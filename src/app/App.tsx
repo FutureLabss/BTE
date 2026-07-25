@@ -2364,7 +2364,7 @@ SELECT cron.schedule(
   'bte-overdue-check',
   '0 7 * * *',
   $$ SELECT net.http_post(
-       url := 'https://zsgmzknzzlorneacmnzb.functions.supabase.co/make-server-ecee925a/overdue-check',
+       url := 'https://zsgmzknzzlorneacmnzb.supabase.co/functions/v1/make-server-ecee925a/make-server-ecee925a/overdue-check',
        headers := jsonb_build_object('Content-Type','application/json')
      ); $$
 );`;

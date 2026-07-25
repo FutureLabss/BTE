@@ -5,7 +5,7 @@ import {
   ChevronRight, Search, Menu, AlertTriangle, CheckCircle2, Clock,
   ArrowUpRight, ArrowDownRight, Building2, BarChart3, Receipt,
   Mail, RefreshCw, LogOut, CheckCheck, Database, Loader2, Eye, EyeOff, Wallet,
-  MapPin, Users, Trash2, CalendarClock, PartyPopper,
+  MapPin, Users, Trash2, CalendarClock, PartyPopper, Download,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import type { Session } from "@supabase/supabase-js";
@@ -28,6 +28,24 @@ const formatDate = (d: string | null) => {
 const daysUntil = (d: string | null) => {
   if (!d) return 999;
   return Math.ceil((new Date(d).getTime() - Date.now()) / 86400000);
+};
+
+// Founder's records must never be locked inside the app — every list view gets a
+// plain client-side CSV export, no server round-trip or extra dependency needed.
+const exportCSV = (rows: any[], filename: string) => {
+  if (rows.length === 0) return;
+  const headers = Object.keys(rows[0]);
+  const escape = (v: unknown) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = [headers.join(","), ...rows.map(r => headers.map(h => escape(r[h])).join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 };
 
 type Pillar = "experiences" | "production" | "communications" | "brand_marketing" | "people_culture";
@@ -687,6 +705,15 @@ SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_mon
 CREATE OR REPLACE VIEW v_receivables AS
 SELECT i.id, i.invoice_number, i.client_id, c.name as client_name, i.issued_date, i.due_date, i.total, i.status, CURRENT_DATE - i.due_date as days_overdue FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.status IN ('sent','overdue') AND i.archived_at IS NULL ORDER BY i.due_date;
 
+CREATE OR REPLACE VIEW v_project_financials AS
+SELECT p.id as project_id, p.name as project_name, p.budget,
+  COALESCE((SELECT SUM(amount) FROM revenue_entries WHERE project_id = p.id), 0) as revenue,
+  COALESCE((SELECT SUM(amount) FROM cost_entries WHERE project_id = p.id), 0) as cost,
+  COALESCE((SELECT SUM(amount) FROM revenue_entries WHERE project_id = p.id), 0)
+    - COALESCE((SELECT SUM(amount) FROM cost_entries WHERE project_id = p.id), 0) as margin,
+  p.budget - COALESCE((SELECT SUM(amount) FROM cost_entries WHERE project_id = p.id), 0) as budget_variance
+FROM projects p WHERE p.archived_at IS NULL;
+
 CREATE OR REPLACE VIEW v_targets_progress AS
 SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='revenue'
 UNION ALL
@@ -968,6 +995,51 @@ const NewTargetModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: ()
   );
 };
 
+const NewQuotationModal = ({ clients, projects, onClose, onSaved }: { clients: any[]; projects: any[]; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({ title: "", client_id: "", project_id: "", total: "", notes: "", status: "draft" });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setSaving(true); setErr("");
+    const total = parseFloat(f.total || "0");
+    const { error } = await supabase.from("quotations").insert({
+      title: f.title, client_id: f.client_id, project_id: f.project_id || null,
+      subtotal: total, total, notes: f.notes || null, status: f.status as any,
+    });
+    setSaving(false);
+    if (error) setErr(error.message); else { onSaved(); onClose(); }
+  };
+
+  return (
+    <Modal title="New Quotation" onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <Field label="Title *"><input required className={inputCls} placeholder="Sheedx Africa Summit — Full Production Quote" value={f.title} onChange={e => set("title", e.target.value)} /></Field>
+        <Field label="Client *">
+          <select required className={selectCls} value={f.client_id} onChange={e => set("client_id", e.target.value)}>
+            <option value="">Select client…</option>{clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Project (optional)">
+          <select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}>
+            <option value="">— None —</option>{projects.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Total (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="8500000" value={f.total} onChange={e => set("total", e.target.value)} /></Field>
+          <Field label="Status"><select className={selectCls} value={f.status} onChange={e => set("status", e.target.value)}><option value="draft">Draft</option><option value="sent">Sent</option></select></Field>
+        </div>
+        <Field label="Notes"><input className={inputCls} placeholder="Scope summary, terms…" value={f.notes} onChange={e => set("notes", e.target.value)} /></Field>
+        {err && <p className="text-sm text-red-400">{err}</p>}
+        <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
+          {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Creating…" : "Create Quotation"}
+        </button>
+      </form>
+    </Modal>
+  );
+};
+
 // ─── Invoice Print ────────────────────────────────────────────────────────────
 
 const printInvoice = (invoice: any, lineItems: any[], clientName: string, projectName?: string) => {
@@ -1109,11 +1181,12 @@ const InvoiceDetailPage = ({ invoice, lineItems, clients, projects, onBack, onRe
 
 // ─── Finance Page ─────────────────────────────────────────────────────────────
 
-const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems, quotations, clients, projects, loading, onNew, onRefresh, onSelectInvoice }: {
+const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems, quotations, clients, projects, loading, onNew, onRefresh, onSelectInvoice, onConvertQuotation }: {
   p2Ready: boolean; revenueEntries: any[]; costEntries: any[]; invoices: any[]; lineItems: any[]; quotations: any[]; clients: any[]; projects: any[];
-  loading: boolean; onNew: (t: string) => void; onRefresh: () => void; onSelectInvoice: (inv: any) => void;
+  loading: boolean; onNew: (t: string) => void; onRefresh: () => void; onSelectInvoice: (inv: any) => void; onConvertQuotation: (q: any) => void;
 }) => {
   const [tab, setTab] = useState<"revenue"|"costs"|"invoices"|"quotations">("revenue");
+  const [converting, setConverting] = useState<string | null>(null);
   const clientMap = Object.fromEntries(clients.map((c: any) => [c.id, c.name]));
   const projectMap = Object.fromEntries(projects.map((p: any) => [p.id, p.name]));
 
@@ -1134,6 +1207,12 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Finance</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Finance</h1></div>
         <div className="flex gap-2">
+          <button
+            onClick={() => exportCSV(
+              tab === "invoices" ? invoices : tab === "costs" ? costEntries : tab === "quotations" ? quotations : revenueEntries,
+              tab
+            )}
+            title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={() => onNew(tab === "invoices" ? "invoice" : tab === "costs" ? "cost" : tab === "quotations" ? "quotation" : "revenue")}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors">
@@ -1233,10 +1312,11 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
           return quotations.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center px-5">
               <p className="text-sm text-[#7070A0] mb-4">No quotations yet.</p>
+              <button onClick={() => onNew("quotation")} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> New Quotation</button>
             </div>
           ) : (
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Title","Client","Version","Total","Status"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Title","Client","Version","Total","Status",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {quotations.map((q: any) => (
                   <tr key={q.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
@@ -1245,6 +1325,17 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">v{q.version}</td>
                     <td className="px-5 py-3.5 text-sm font-mono text-white">{formatNaira(q.total)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={q.status} /></td>
+                    <td className="px-5 py-3.5">
+                      {q.status !== "accepted" && q.status !== "declined" && (
+                        <button
+                          disabled={converting === q.id}
+                          onClick={async () => { setConverting(q.id); await onConvertQuotation(q); setConverting(null); }}
+                          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-400/10 text-emerald-400 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors disabled:opacity-50"
+                        >
+                          {converting === q.id ? "Converting…" : "Convert to Invoice"}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1362,6 +1453,46 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY; ALTER TABLE event_crew ENABLE ROW 
 DO $$ BEGIN CREATE POLICY "auth_all_events" ON events FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE POLICY "auth_all_event_crew" ON event_crew FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE POLICY "auth_all_event_schedule" ON event_schedule FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`;
+
+// ─── Phase 3b Migration SQL (speakers/guests + attendees) ──────────────────────
+// Run AFTER Phase 3 above. Adds the PRD's event_people (speakers/guests/moderators/
+// performers) and attendees (with CSV import support in the UI) tables — the original
+// Phase 3 migration shipped a simplified crew+schedule model without these.
+const MIGRATION_SQL_P3B = `-- BTE Admin Portal — Phase 3b Migration (Speakers, Guests & Attendees)
+-- Run AFTER Phase 3. Paste into: Supabase Dashboard → SQL Editor → Run
+
+DO $$ BEGIN CREATE TYPE event_person_role_enum AS ENUM ('speaker','guest','moderator','performer'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS event_people (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), event_id uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE, name text NOT NULL, role event_person_role_enum NOT NULL DEFAULT 'guest', organisation text, contact text, confirmed boolean NOT NULL DEFAULT false, travel_logistics text, notes text, created_at timestamptz NOT NULL DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS attendees (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), event_id uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE, name text NOT NULL, email text, phone text, ticket_type text, checked_in boolean NOT NULL DEFAULT false, checked_in_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+
+-- Powers the day-of "Go Live" run-of-show view (tap a segment to cycle pending → live → done)
+ALTER TABLE event_schedule ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
+
+ALTER TABLE event_people ENABLE ROW LEVEL SECURITY; ALTER TABLE attendees ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN CREATE POLICY "auth_all_event_people" ON event_people FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "auth_all_attendees" ON attendees FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`;
+
+const P3bSetupBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P3B); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-amber-400/20 rounded-xl p-4 space-y-3">
+      <div className="flex items-start gap-2.5">
+        <AlertTriangle size={15} className="text-amber-400 flex-shrink-0 mt-0.5" />
+        <p className="text-xs text-[#7070A0]">Speakers, guests &amp; attendees need one more migration. Copy the SQL and run it in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a>, then refresh.</p>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-lg p-3 overflow-auto max-h-32 whitespace-pre-wrap break-all">{MIGRATION_SQL_P3B}</pre>
+        <button onClick={copy} className="absolute top-2 right-2 flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={12} /> : <Database size={12} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const P3SetupBanner = () => {
   const [copied, setCopied] = useState(false);
@@ -1532,14 +1663,42 @@ const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh
   );
 };
 
-const EventDetailPage = ({ event, clients, projects, staff, onBack, onRefresh }: {
-  event: any; clients: any[]; projects: any[]; staff: any[]; onBack: () => void; onRefresh: () => void;
+// Minimal CSV parser for attendee import — handles simple comma-separated files with
+// a header row (name,email,phone,ticket_type). Doesn't handle quoted fields with
+// embedded commas; if the founder's registration exports need that, upgrade to a
+// small parsing library at that point rather than guessing now.
+const parseAttendeeCSV = (text: string): { name: string; email: string; phone: string; ticket_type: string }[] => {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.trim().toLowerCase());
+  const idx = (key: string) => headers.findIndex(h => h.includes(key));
+  const nameIdx = idx("name"), emailIdx = idx("email"), phoneIdx = idx("phone"), ticketIdx = idx("ticket");
+  return lines.slice(1).map(line => {
+    const cells = line.split(",").map(c => c.trim());
+    return {
+      name: nameIdx >= 0 ? cells[nameIdx] ?? "" : "",
+      email: emailIdx >= 0 ? cells[emailIdx] ?? "" : "",
+      phone: phoneIdx >= 0 ? cells[phoneIdx] ?? "" : "",
+      ticket_type: ticketIdx >= 0 ? cells[ticketIdx] ?? "" : "",
+    };
+  }).filter(a => a.name);
+};
+
+const EVENT_PERSON_ROLE_LABELS: Record<string, string> = { speaker: "Speaker", guest: "Guest", moderator: "Moderator", performer: "Performer" };
+
+const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, onRefresh, onGoLive }: {
+  event: any; clients: any[]; projects: any[]; staff: any[]; p3bReady: boolean; onBack: () => void; onRefresh: () => void; onGoLive: () => void;
 }) => {
   const [crew, setCrew] = useState<any[]>([]);
   const [schedule, setSchedule] = useState<any[]>([]);
+  const [people, setPeople] = useState<any[]>([]);
+  const [attendees, setAttendees] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [crewForm, setCrewForm] = useState({ staff_id: "", role: "", call_time: "" });
   const [schedForm, setSchedForm] = useState({ title: "", start_time: "", end_time: "", owner: "" });
+  const [personForm, setPersonForm] = useState({ name: "", role: "guest", organisation: "" });
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
   const clientName = clients.find((c: any) => c.id === event.client_id)?.name;
   const projectName = projects.find((p: any) => p.id === event.project_id)?.name;
   const leadName = staff.find((s: any) => s.id === event.lead_id)?.name;
@@ -1553,9 +1712,40 @@ const EventDetailPage = ({ event, clients, projects, staff, onBack, onRefresh }:
     ]);
     setCrew(cr.data ?? []);
     setSchedule(sc.data ?? []);
+    if (p3bReady) {
+      const [pp, at] = await Promise.all([
+        supabase.from("event_people").select("*").eq("event_id", event.id).order("created_at"),
+        supabase.from("attendees").select("*").eq("event_id", event.id).order("created_at"),
+      ]);
+      setPeople(pp.data ?? []);
+      setAttendees(at.data ?? []);
+    }
     setLoading(false);
-  }, [event.id]);
+  }, [event.id, p3bReady]);
   useEffect(() => { load(); }, [load]);
+
+  const addPerson = async (e: React.FormEvent) => {
+    e.preventDefault(); if (!personForm.name) return;
+    await supabase.from("event_people").insert({ event_id: event.id, name: personForm.name, role: personForm.role as any, organisation: personForm.organisation || null });
+    setPersonForm({ name: "", role: "guest", organisation: "" }); load();
+  };
+  const removePerson = async (id: string) => { await supabase.from("event_people").delete().eq("id", id); load(); };
+  const toggleConfirmed = async (p: any) => { await supabase.from("event_people").update({ confirmed: !p.confirmed }).eq("id", p.id); load(); };
+
+  const importAttendees = async (file: File) => {
+    setImporting(true); setImportMsg("");
+    const text = await file.text();
+    const rows = parseAttendeeCSV(text);
+    if (rows.length === 0) { setImportMsg("No valid rows found — expected a header row with name/email/phone/ticket columns."); setImporting(false); return; }
+    const { error } = await supabase.from("attendees").insert(rows.map(r => ({ event_id: event.id, ...r })));
+    setImporting(false);
+    setImportMsg(error ? error.message : `Imported ${rows.length} attendees.`);
+    if (!error) load();
+  };
+  const toggleCheckedIn = async (a: any) => {
+    await supabase.from("attendees").update({ checked_in: !a.checked_in, checked_in_at: !a.checked_in ? new Date().toISOString() : null }).eq("id", a.id);
+    load();
+  };
 
   const updateStatus = async (status: string) => { await supabase.from("events").update({ status }).eq("id", event.id); onRefresh(); };
 
@@ -1590,9 +1780,14 @@ const EventDetailPage = ({ event, clients, projects, staff, onBack, onRefresh }:
             </div>
             <h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{event.name}</h1>
           </div>
-          <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-2 text-white" defaultValue={event.status} onChange={e => updateStatus(e.target.value)}>
-            {["planning","confirmed","in_progress","completed","cancelled"].map(s => <option key={s} value={s}>{STATUS_CFG[s]?.label}</option>)}
-          </select>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={onGoLive} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors">
+              <Clock size={15} /> Go Live
+            </button>
+            <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-2 text-white" defaultValue={event.status} onChange={e => updateStatus(e.target.value)}>
+              {["planning","confirmed","in_progress","completed","cancelled"].map(s => <option key={s} value={s}>{STATUS_CFG[s]?.label}</option>)}
+            </select>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 text-xs">
@@ -1662,6 +1857,137 @@ const EventDetailPage = ({ event, clients, projects, staff, onBack, onRefresh }:
           </form>
         </div>
       </div>
+
+      {!p3bReady ? <P3bSetupBanner /> : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Speakers & Guests */}
+          <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4"><UserSquare2 size={16} className="text-[#FF4D00]" /><h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Speakers &amp; Guests</h2><span className="text-xs font-mono text-[#7070A0]">({people.length})</span></div>
+            {loading ? <Spinner /> : people.length === 0 ? <p className="text-sm text-[#7070A0] mb-4">No speakers or guests added yet.</p> : (
+              <div className="space-y-2 mb-4">
+                {people.map((p: any) => (
+                  <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                    <button onClick={() => toggleConfirmed(p)} title="Click to toggle confirmed"
+                      className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${p.confirmed ? "bg-emerald-400 border-emerald-400" : "border-white/20"}`}>
+                      {p.confirmed && <span className="text-white text-[9px]">✓</span>}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white truncate">{p.name}</div>
+                      <div className="text-xs font-mono text-[#7070A0]">{EVENT_PERSON_ROLE_LABELS[p.role] ?? p.role}{p.organisation ? ` · ${p.organisation}` : ""}</div>
+                    </div>
+                    <button onClick={() => removePerson(p.id)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <form onSubmit={addPerson} className="space-y-2 pt-4 border-t border-white/6">
+              <input className={inputCls} placeholder="Name *" value={personForm.name} onChange={e => setPersonForm(p => ({ ...p, name: e.target.value }))} />
+              <div className="flex gap-2">
+                <select className={selectCls} value={personForm.role} onChange={e => setPersonForm(p => ({ ...p, role: e.target.value }))}>
+                  {Object.entries(EVENT_PERSON_ROLE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+                <input className={inputCls} placeholder="Organisation" value={personForm.organisation} onChange={e => setPersonForm(p => ({ ...p, organisation: e.target.value }))} />
+              </div>
+              <button type="submit" disabled={!personForm.name} className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/8 border border-white/8 text-sm text-white disabled:opacity-40 transition-colors flex items-center justify-center gap-2"><Plus size={14} /> Add Person</button>
+            </form>
+          </div>
+
+          {/* Attendees */}
+          <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Users size={16} className="text-[#FF4D00]" /><h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Attendees</h2>
+              <span className="text-xs font-mono text-[#7070A0]">({attendees.filter((a: any) => a.checked_in).length}/{attendees.length} checked in)</span>
+            </div>
+            <label className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg border border-dashed border-white/10 text-xs text-[#7070A0] hover:border-white/20 hover:text-white transition-colors cursor-pointer w-fit">
+              <input type="file" accept=".csv,text/csv" className="hidden" disabled={importing}
+                onChange={e => { const f = e.target.files?.[0]; if (f) importAttendees(f); e.target.value = ""; }} />
+              {importing ? <Spinner /> : <Database size={13} />} Import CSV (name, email, phone, ticket_type)
+            </label>
+            {importMsg && <p className="text-xs text-[#7070A0] mb-4">{importMsg}</p>}
+            {loading ? <Spinner /> : attendees.length === 0 ? <p className="text-sm text-[#7070A0]">No attendees yet — import a registration list above.</p> : (
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {attendees.map((a: any) => (
+                  <div key={a.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                    <button onClick={() => toggleCheckedIn(a)} title="Click to toggle check-in"
+                      className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${a.checked_in ? "bg-emerald-400 border-emerald-400" : "border-white/20"}`}>
+                      {a.checked_in && <span className="text-white text-[9px]">✓</span>}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white truncate">{a.name}</div>
+                      <div className="text-xs font-mono text-[#7070A0] truncate">{[a.email, a.ticket_type].filter(Boolean).join(" · ") || "—"}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Event Live (day-of mobile run-of-show) ────────────────────────────────────
+
+const EventLivePage = ({ event, onExit }: { event: any; onExit: () => void }) => {
+  const [schedule, setSchedule] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [cycling, setCycling] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const { data } = await supabase.from("event_schedule").select("*").eq("event_id", event.id).order("sort_order").order("start_time");
+    setSchedule(data ?? []);
+    setLoading(false);
+  }, [event.id]);
+  useEffect(() => { load(); }, [load]);
+
+  const LIVE_CYCLE: Record<string, string> = { pending: "live", live: "done", done: "pending" };
+  const cycle = async (item: any) => {
+    setCycling(item.id);
+    await supabase.from("event_schedule").update({ status: LIVE_CYCLE[item.status ?? "pending"] ?? "live" }).eq("id", item.id);
+    await load();
+    setCycling(null);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-[#08080F] flex flex-col" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+      <div className="flex-shrink-0 flex items-center justify-between px-4 py-4 border-b border-white/8">
+        <div className="min-w-0">
+          <div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest">Live Run of Show</div>
+          <h1 className="text-lg font-bold text-white truncate" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{event.name}</h1>
+        </div>
+        <button onClick={onExit} className="flex-shrink-0 p-3 rounded-xl bg-white/5 text-white hover:bg-white/10 transition-colors"><X size={20} /></button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+        {loading ? (
+          <div className="flex justify-center py-20"><Spinner /></div>
+        ) : schedule.length === 0 ? (
+          <p className="text-center text-sm text-[#7070A0] py-20">No run-of-show segments yet — add them from the event's detail page.</p>
+        ) : (
+          schedule.map((s: any) => {
+            const status = s.status ?? "pending";
+            return (
+              <button key={s.id} onClick={() => cycle(s)} disabled={cycling === s.id}
+                className={`w-full text-left p-5 rounded-2xl border transition-all ${
+                  status === "live" ? "bg-[#FF4D00]/10 border-[#FF4D00]/40" :
+                  status === "done" ? "bg-white/2 border-white/6 opacity-50" :
+                  "bg-[#10101C] border-white/8"
+                }`}>
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <span className="text-sm font-mono text-[#FF4D00]">{s.start_time || "—"}{s.end_time ? `–${s.end_time}` : ""}</span>
+                  <span className={`text-xs font-mono uppercase tracking-widest px-2 py-1 rounded-md ${
+                    status === "live" ? "bg-[#FF4D00] text-white" : status === "done" ? "text-emerald-400" : "text-[#7070A0]"
+                  }`}>{status === "live" ? "● Live now" : status === "done" ? "✓ Done" : "Tap to start"}</span>
+                </div>
+                <div className={`text-lg font-semibold ${status === "done" ? "line-through text-[#7070A0]" : "text-white"}`}>{s.title}</div>
+                {s.owner && <div className="text-sm text-[#7070A0] mt-1">{s.owner}</div>}
+              </button>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 };
@@ -1723,6 +2049,80 @@ INSERT INTO vendors (name, category, city, contact_phone, rating) VALUES
 ('Glow Decor & Florals','Decor','Lagos','+234 803 000 0009',5),
 ('PowerGen Rentals','Power & Generators','Abuja','+234 803 000 0010',4)
 ON CONFLICT DO NOTHING;`;
+
+// ─── Phase 4b Migration SQL (RLS hardening) ────────────────────────────────────
+// Run AFTER Phase 4 above. Replaces "any authenticated user, full access" policies on
+// finance/payroll/vendor tables with policies that actually check profiles.role — the
+// Role/PAGE_ACCESS system in the UI only hides nav items today; the database itself
+// still allows any signed-in user to read/write payroll, revenue, invoices, etc. via
+// the Supabase API directly. This closes that gap for the coarse-grained access the
+// UI already implies (founder+ops_lead for finance/vendors/targets, founder-only for
+// payroll). It intentionally does NOT implement the PRD §8 row-level nuances ("team
+// lead: own pillar only", "member: own tasks only") — those need founder sign-off
+// first per the PRD's own process, so Phase 1–3 tables and `projects`/`tasks` keep
+// their existing "any authenticated user" policies until that's decided.
+const MIGRATION_SQL_P4_SECURITY = `-- BTE Admin Portal — Phase 4b Migration (Role-aware RLS)
+-- Run AFTER Phase 4. Paste into: Supabase Dashboard → SQL Editor → Run
+
+CREATE OR REPLACE FUNCTION current_role() RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT role FROM profiles WHERE id = auth.uid();
+$$;
+
+-- Finance & Targets — founder + ops_lead only
+DROP POLICY IF EXISTS "auth_all_revenue_entries" ON revenue_entries;
+CREATE POLICY "role_revenue_entries" ON revenue_entries FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_cost_entries" ON cost_entries;
+CREATE POLICY "role_cost_entries" ON cost_entries FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_invoices" ON invoices;
+CREATE POLICY "role_invoices" ON invoices FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_invoice_line_items" ON invoice_line_items;
+CREATE POLICY "role_invoice_line_items" ON invoice_line_items FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_quotations" ON quotations;
+CREATE POLICY "role_quotations" ON quotations FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_targets" ON targets;
+CREATE POLICY "role_targets" ON targets FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+
+-- Vendors & Purchase Orders — founder + ops_lead only
+DROP POLICY IF EXISTS "auth_all_vendors" ON vendors;
+CREATE POLICY "role_vendors" ON vendors FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+DROP POLICY IF EXISTS "auth_all_purchase_orders" ON purchase_orders;
+CREATE POLICY "role_purchase_orders" ON purchase_orders FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+
+-- Payroll — founder only
+DROP POLICY IF EXISTS "auth_all_payroll_entries" ON payroll_entries;
+CREATE POLICY "role_payroll_entries" ON payroll_entries FOR ALL TO authenticated USING (current_role() = 'founder') WITH CHECK (current_role() = 'founder');
+
+-- Profiles — everyone can read (needed for role bootstrap + team list), anyone may
+-- insert only their own row (first-sign-in bootstrap), but only founder may change
+-- anyone's role (blocks a member from self-promoting via a direct API call).
+DROP POLICY IF EXISTS "auth_all_profiles" ON profiles;
+CREATE POLICY "profiles_select_all" ON profiles FOR SELECT TO authenticated USING (true);
+CREATE POLICY "profiles_insert_own" ON profiles FOR INSERT TO authenticated WITH CHECK (id = auth.uid());
+CREATE POLICY "profiles_update_founder_or_self_noop" ON profiles FOR UPDATE TO authenticated
+  USING (current_role() = 'founder' OR id = auth.uid())
+  WITH CHECK (current_role() = 'founder' OR (id = auth.uid() AND role = current_role()));`;
+
+const P4SecurityBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P4_SECURITY); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-red-400/20 rounded-2xl p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={18} className="text-red-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <h3 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Security: tighten database access by role</h3>
+          <p className="text-sm text-[#7070A0]">Today, any signed-in team member can read/write finance and payroll data directly via the Supabase API, regardless of their assigned role here — the role system only hides navigation in this UI. Run this once in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a> to enforce it at the database level too.</p>
+        </div>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-xl p-4 overflow-auto max-h-48 whitespace-pre-wrap break-all">{MIGRATION_SQL_P4_SECURITY}</pre>
+        <button onClick={copy} className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={13} /> : <Database size={13} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const P4SetupBanner = () => {
   const [copied, setCopied] = useState(false);
@@ -1883,6 +2283,7 @@ const PayrollPage = ({ p4Ready, role, payroll, staff, loading, onNew, onRefresh 
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">People</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Payroll</h1></div>
         <div className="flex gap-2">
+          <button onClick={() => exportCSV(payroll, "payroll")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> Log Payroll</button>
         </div>
@@ -2033,6 +2434,7 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Finance</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Vendors &amp; POs</h1></div>
         <div className="flex gap-2">
+          <button onClick={() => exportCSV(tab === "vendors" ? vendors : purchaseOrders, tab === "vendors" ? "vendors" : "purchase-orders")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={() => onNew(tab === "vendors" ? "vendor" : "po")} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} />{tab === "vendors" ? "New Vendor" : "Raise PO"}</button>
         </div>
@@ -2119,6 +2521,8 @@ const SettingsPage = ({ role, profiles, currentUserId, p4Ready, onRefresh }: {
         <p className="text-sm text-[#7070A0] mb-3">You are signed in as <span className="text-white font-medium">{ROLE_LABELS[role]}</span>.</p>
         <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-mono border border-[#FF4D00]/30 bg-[#FF4D00]/10 text-[#FF4D00]">{ROLE_LABELS[role]}</span>
       </div>
+
+      {role === "founder" && p4Ready && <P4SecurityBanner />}
 
       {role === "founder" && (
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
@@ -2340,7 +2744,11 @@ const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect }: { clients
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Clients</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Client Directory</h1></div>
-        <div className="flex gap-2"><button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button><button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Client</button></div>
+        <div className="flex gap-2">
+          <button onClick={() => exportCSV(clients, "clients")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
+          <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
+          <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Client</button>
+        </div>
       </div>
       <div className="flex gap-2 flex-wrap">
         {["all","active","prospect","inactive"].map(s => (
@@ -2386,6 +2794,7 @@ const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead }: { leads: an
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Pipeline</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{formatNaira(pipeline)} open</h1></div>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg border border-white/8 overflow-hidden">{(["kanban","list"] as const).map(v => <button key={v} onClick={() => setView(v)} className={`px-3 py-1.5 text-xs font-mono capitalize transition-colors ${view === v ? "bg-white/10 text-white" : "text-[#7070A0] hover:text-white"}`}>{v}</button>)}</div>
+          <button onClick={() => exportCSV(leads, "leads")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> Add Lead</button>
         </div>
@@ -2447,7 +2856,11 @@ const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onS
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Projects</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>All Projects</h1></div>
-        <div className="flex gap-2"><button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button><button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Project</button></div>
+        <div className="flex gap-2">
+          <button onClick={() => exportCSV(projects, "projects")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
+          <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
+          <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Project</button>
+        </div>
       </div>
       <div className="flex gap-2 flex-wrap">
         {["all","in_progress","at_risk","delayed","not_started","complete"].map(s => (
@@ -2496,7 +2909,7 @@ const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onS
 
 const CONTRACT_LABELS: Record<string, string> = { core_staff: "Core Staff", contractor: "Contractor", freelancer: "Freelancer", ace_collective: "ACE Collective" };
 
-const StaffPage = ({ staff, loading }: { staff: any[]; loading: boolean }) => (
+const StaffPage = ({ staff, loading, onSelect }: { staff: any[]; loading: boolean; onSelect: (m: any) => void }) => (
   <div className="space-y-5">
     <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">People</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Staff — {staff.filter((s: any) => s.active).length} active</h1></div>
     {loading ? <div className="flex justify-center py-20"><Spinner /></div>
@@ -2504,7 +2917,7 @@ const StaffPage = ({ staff, loading }: { staff: any[]; loading: boolean }) => (
       : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {staff.map((m: any) => (
-            <div key={m.id} className="bg-[#10101C] border border-white/6 rounded-2xl p-5 hover:border-white/10 transition-colors">
+            <div key={m.id} onClick={() => onSelect(m)} className="bg-[#10101C] border border-white/6 rounded-2xl p-5 hover:border-white/10 transition-colors cursor-pointer">
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
                   {m.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
@@ -2542,17 +2955,36 @@ const TASK_CYCLE: Record<string, string> = {
   blocked: "in_progress",
 };
 
-const ProjectDetailPage = ({ project, tasks, clients, staff, onBack, onRefresh, onAddTask }: {
-  project: any; tasks: any[]; clients: any[]; staff: any[];
+const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p4Ready, onBack, onRefresh, onAddTask }: {
+  project: any; tasks: any[]; clients: any[]; staff: any[]; vendors: any[]; p4Ready: boolean;
   onBack: () => void; onRefresh: () => void; onAddTask: () => void;
 }) => {
   const [cycling, setCycling] = useState<string | null>(null);
   const [editingStatus, setEditingStatus] = useState(false);
+  const [assignments, setAssignments] = useState<any[]>([]);
+  const [projectVendors, setProjectVendors] = useState<any[]>([]);
+  const [loadingRel, setLoadingRel] = useState(true);
+  const [assignForm, setAssignForm] = useState({ staff_id: "", role_on_project: "", allocation_pct: "" });
+  const [vendorForm, setVendorForm] = useState({ vendor_id: "", engagement_notes: "", debrief_notes: "" });
   const clientMap = Object.fromEntries(clients.map((c: any) => [c.id, c.name]));
   const staffMap = Object.fromEntries(staff.map((s: any) => [s.id, s.name]));
+  const vendorMap = Object.fromEntries(vendors.map((v: any) => [v.id, v.name]));
   const myTasks = tasks.filter((t: any) => t.project_id === project.id);
   const done = myTasks.filter((t: any) => t.status === "done").length;
   const d = daysUntil(project.deadline);
+
+  const loadRel = useCallback(async () => {
+    if (!p4Ready) { setLoadingRel(false); return; }
+    setLoadingRel(true);
+    const [as, pv] = await Promise.all([
+      supabase.from("project_assignments").select("*").eq("project_id", project.id).order("created_at"),
+      supabase.from("project_vendors").select("*").eq("project_id", project.id).order("created_at"),
+    ]);
+    setAssignments(as.data ?? []);
+    setProjectVendors(pv.data ?? []);
+    setLoadingRel(false);
+  }, [project.id, p4Ready]);
+  useEffect(() => { loadRel(); }, [loadRel]);
 
   const cycleTask = async (task: any) => {
     setCycling(task.id);
@@ -2566,6 +2998,28 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, onBack, onRefresh, 
     setEditingStatus(false);
     onRefresh();
   };
+
+  const addAssignment = async (e: React.FormEvent) => {
+    e.preventDefault(); if (!assignForm.staff_id) return;
+    await supabase.from("project_assignments").insert({
+      project_id: project.id, staff_id: assignForm.staff_id,
+      role_on_project: assignForm.role_on_project || null,
+      allocation_pct: assignForm.allocation_pct ? parseInt(assignForm.allocation_pct, 10) : null,
+    });
+    setAssignForm({ staff_id: "", role_on_project: "", allocation_pct: "" }); loadRel();
+  };
+  const removeAssignment = async (id: string) => { await supabase.from("project_assignments").delete().eq("id", id); loadRel(); };
+
+  const addProjectVendor = async (e: React.FormEvent) => {
+    e.preventDefault(); if (!vendorForm.vendor_id) return;
+    await supabase.from("project_vendors").insert({
+      project_id: project.id, vendor_id: vendorForm.vendor_id,
+      engagement_notes: vendorForm.engagement_notes || null,
+      debrief_notes: vendorForm.debrief_notes || null,
+    });
+    setVendorForm({ vendor_id: "", engagement_notes: "", debrief_notes: "" }); loadRel();
+  };
+  const removeProjectVendor = async (id: string) => { await supabase.from("project_vendors").delete().eq("id", id); loadRel(); };
 
   return (
     <div className="space-y-6">
@@ -2666,6 +3120,137 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, onBack, onRefresh, 
           </div>
         )}
       </div>
+
+      {!p4Ready ? <P4SetupBanner /> : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Team Assignments */}
+          <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4"><Users size={16} className="text-[#FF4D00]" /><h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Team Assignments</h2><span className="text-xs font-mono text-[#7070A0]">({assignments.length})</span></div>
+            {loadingRel ? <Spinner /> : assignments.length === 0 ? <p className="text-sm text-[#7070A0] mb-4">No one assigned yet.</p> : (
+              <div className="space-y-2 mb-4">
+                {assignments.map((a: any) => (
+                  <div key={a.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white truncate">{staffMap[a.staff_id] ?? "Unknown"}</div>
+                      <div className="text-xs font-mono text-[#7070A0]">{a.role_on_project || "—"}{a.allocation_pct != null ? ` · ${a.allocation_pct}%` : ""}</div>
+                    </div>
+                    <button onClick={() => removeAssignment(a.id)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <form onSubmit={addAssignment} className="space-y-2 pt-4 border-t border-white/6">
+              <select className={selectCls} value={assignForm.staff_id} onChange={e => setAssignForm(p => ({ ...p, staff_id: e.target.value }))}><option value="">Select staff *…</option>{staff.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+              <div className="flex gap-2">
+                <input className={inputCls} placeholder="Role on project" value={assignForm.role_on_project} onChange={e => setAssignForm(p => ({ ...p, role_on_project: e.target.value }))} />
+                <input type="number" min="0" max="200" className={`${inputCls} w-28`} placeholder="Alloc %" value={assignForm.allocation_pct} onChange={e => setAssignForm(p => ({ ...p, allocation_pct: e.target.value }))} />
+              </div>
+              <button type="submit" disabled={!assignForm.staff_id} className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/8 border border-white/8 text-sm text-white disabled:opacity-40 transition-colors flex items-center justify-center gap-2"><Plus size={14} /> Add Assignment</button>
+            </form>
+          </div>
+
+          {/* Vendors Engaged */}
+          <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4"><Truck size={16} className="text-[#FF4D00]" /><h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Vendors Engaged</h2><span className="text-xs font-mono text-[#7070A0]">({projectVendors.length})</span></div>
+            {loadingRel ? <Spinner /> : projectVendors.length === 0 ? <p className="text-sm text-[#7070A0] mb-4">No vendors engaged yet.</p> : (
+              <div className="space-y-2 mb-4">
+                {projectVendors.map((v: any) => (
+                  <div key={v.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white truncate">{vendorMap[v.vendor_id] ?? "Unknown"}</div>
+                      {v.engagement_notes && <div className="text-xs font-mono text-[#7070A0] truncate">{v.engagement_notes}</div>}
+                    </div>
+                    <button onClick={() => removeProjectVendor(v.id)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <form onSubmit={addProjectVendor} className="space-y-2 pt-4 border-t border-white/6">
+              <select className={selectCls} value={vendorForm.vendor_id} onChange={e => setVendorForm(p => ({ ...p, vendor_id: e.target.value }))}><option value="">Select vendor *…</option>{vendors.map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}</select>
+              <input className={inputCls} placeholder="Engagement notes" value={vendorForm.engagement_notes} onChange={e => setVendorForm(p => ({ ...p, engagement_notes: e.target.value }))} />
+              <input className={inputCls} placeholder="Debrief notes" value={vendorForm.debrief_notes} onChange={e => setVendorForm(p => ({ ...p, debrief_notes: e.target.value }))} />
+              <button type="submit" disabled={!vendorForm.vendor_id} className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/8 border border-white/8 text-sm text-white disabled:opacity-40 transition-colors flex items-center justify-center gap-2"><Plus size={14} /> Add Vendor</button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Staff Detail Page ────────────────────────────────────────────────────────
+
+const StaffDetailPage = ({ staffMember, projects, p4Ready, onBack }: {
+  staffMember: any; projects: any[]; p4Ready: boolean; onBack: () => void;
+}) => {
+  const [assignments, setAssignments] = useState<any[]>([]);
+  const [staffLoad, setStaffLoad] = useState<{ active_assignments: number; total_allocation: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const projectMap = Object.fromEntries(projects.map((p: any) => [p.id, p.name]));
+
+  useEffect(() => {
+    if (!p4Ready) { setLoading(false); return; }
+    setLoading(true);
+    (async () => {
+      const [as, vl] = await Promise.all([
+        supabase.from("project_assignments").select("*").eq("staff_id", staffMember.id).order("created_at"),
+        supabase.from("v_staff_load").select("*").eq("staff_id", staffMember.id).maybeSingle(),
+      ]);
+      setAssignments(as.data ?? []);
+      setStaffLoad(vl.data ?? null);
+      setLoading(false);
+    })();
+  }, [staffMember.id, p4Ready]);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-2 text-sm">
+        <button onClick={onBack} className="flex items-center gap-1 text-[#7070A0] hover:text-white transition-colors">
+          <ChevronRight size={14} className="rotate-180" /> Staff
+        </button>
+        <ChevronRight size={13} className="text-[#3A3A5E]" />
+        <span className="text-white truncate">{staffMember.name}</span>
+      </div>
+
+      <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+        <div className="flex items-start gap-4">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+            {staffMember.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+          </div>
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{staffMember.name}</h1>
+            <div className="text-sm text-[#7070A0] mt-0.5">{staffMember.role_title ?? "—"} · {staffMember.team ?? "—"}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5 pt-5 border-t border-white/5 text-xs">
+          <div><div className="text-[#7070A0] font-mono mb-1">Contract</div><div className="text-white">{CONTRACT_LABELS[staffMember.contract_type] ?? staffMember.contract_type}</div></div>
+          <div><div className="text-[#7070A0] font-mono mb-1">Pillar</div><div className="text-white">{staffMember.pillar ? <PillarBadge pillar={staffMember.pillar} /> : "—"}</div></div>
+          <div><div className="text-[#7070A0] font-mono mb-1">Capacity</div><div className="text-white font-mono">{staffMember.capacity_pct != null ? `${staffMember.capacity_pct}%` : "—"}</div></div>
+          <div><div className="text-[#7070A0] font-mono mb-1">Active</div><div className="text-white">{staffMember.active ? "Yes" : "No"}</div></div>
+        </div>
+      </div>
+
+      {!p4Ready ? <P4SetupBanner /> : (
+        <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
+          <div className="flex items-center gap-2 mb-4">
+            <FolderOpen size={16} className="text-[#FF4D00]" />
+            <h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Project Load</h2>
+            {staffLoad && <span className="text-xs font-mono text-[#7070A0]">{staffLoad.active_assignments} active · {staffLoad.total_allocation}% allocated</span>}
+          </div>
+          {loading ? <Spinner /> : assignments.length === 0 ? <p className="text-sm text-[#7070A0]">Not assigned to any projects yet — assign them from a project's detail page.</p> : (
+            <div className="space-y-2">
+              {assignments.map((a: any) => (
+                <div key={a.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-white truncate">{projectMap[a.project_id] ?? "Unknown project"}</div>
+                    <div className="text-xs font-mono text-[#7070A0]">{a.role_on_project || "—"}{a.allocation_pct != null ? ` · ${a.allocation_pct}%` : ""}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -2986,12 +3571,15 @@ export default function App() {
   const [role, setRole] = useState<Role>("founder");
   const [p2Ready, setP2Ready] = useState(false);
   const [p3Ready, setP3Ready] = useState(false);
+  const [p3bReady, setP3bReady] = useState(false);
   const [p4Ready, setP4Ready] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [selectedProject, setSelectedProject] = useState<any | null>(null);
   const [selectedClient, setSelectedClient] = useState<any | null>(null);
   const [selectedInvoice, setSelectedInvoice] = useState<any | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<any | null>(null);
+  const [selectedStaff, setSelectedStaff] = useState<any | null>(null);
+  const [liveEvent, setLiveEvent] = useState<any | null>(null);
   const [editingLead, setEditingLead] = useState<any | null>(null);
 
   // Auth listener
@@ -3063,6 +3651,10 @@ export default function App() {
     if (evCheck.error) { setP3Ready(false); }
     else { setP3Ready(true); setEvents(evCheck.data ?? []); }
 
+    // Phase 3b tables (event_people · attendees) — optional addendum on top of Phase 3
+    const epCheck = await supabase.from("event_people").select("id").limit(1);
+    setP3bReady(!epCheck.error);
+
     // Phase 4 tables (payroll · POs · vendors · roles)
     const profCheck = await supabase.from("profiles").select("*").order("created_at");
     if (profCheck.error) { setP4Ready(false); }
@@ -3118,7 +3710,19 @@ export default function App() {
     else if (action === "Log Cost") { setPage("finance"); setModal("cost"); }
   };
 
-  const navTo = (p: Page) => { setPage(p); setSelectedProject(null); setSelectedClient(null); setSelectedInvoice(null); setSelectedEvent(null); setMobileOpen(false); };
+  const navTo = (p: Page) => { setPage(p); setSelectedProject(null); setSelectedClient(null); setSelectedInvoice(null); setSelectedEvent(null); setSelectedStaff(null); setMobileOpen(false); };
+
+  const convertQuotationToInvoice = async (q: any) => {
+    const dueDate = new Date(); dueDate.setDate(dueDate.getDate() + 14);
+    const { error } = await supabase.from("invoices").insert({
+      client_id: q.client_id, project_id: q.project_id ?? null,
+      due_date: dueDate.toISOString().slice(0, 10),
+      status: "draft", subtotal: q.subtotal, total: q.total,
+      notes: q.title,
+    });
+    if (!error) await supabase.from("quotations").update({ status: "accepted" }).eq("id", q.id);
+    await fetchAll();
+  };
 
   // ── Render gates ──────────────────────────────────────────────────────────
 
@@ -3135,6 +3739,8 @@ export default function App() {
   if (passwordRecovery) return <SetNewPasswordScreen onDone={() => setPasswordRecovery(false)} />;
 
   if (needsSetup) return <SetupScreen onComplete={() => { setNeedsSetup(false); fetchAll(); }} />;
+
+  if (liveEvent) return <EventLivePage event={liveEvent} onExit={() => setLiveEvent(null)} />;
 
   const renderPage = () => {
     if (!canAccess(role, page)) return <NoAccess />;
@@ -3160,13 +3766,24 @@ export default function App() {
             tasks={tasks}
             clients={clients}
             staff={staff}
+            vendors={vendors}
+            p4Ready={p4Ready}
             onBack={() => setSelectedProject(null)}
             onRefresh={fetchAll}
             onAddTask={() => setModal("task-for-project")}
           />
         );
         return <ProjectsPage projects={projects} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("project")} onRefresh={fetchAll} onSelect={p => setSelectedProject(p)} />;
-      case "staff":     return <StaffPage staff={staff} loading={loadingData} />;
+      case "staff":
+        if (selectedStaff) return (
+          <StaffDetailPage
+            staffMember={staff.find((s: any) => s.id === selectedStaff.id) ?? selectedStaff}
+            projects={projects}
+            p4Ready={p4Ready}
+            onBack={() => setSelectedStaff(null)}
+          />
+        );
+        return <StaffPage staff={staff} loading={loadingData} onSelect={m => setSelectedStaff(m)} />;
       case "payroll":   return <PayrollPage p4Ready={p4Ready} role={role} payroll={payroll} staff={staff} loading={loadingData} onNew={() => setModal("payroll")} onRefresh={fetchAll} />;
       case "vendors":   return <VendorsPage p4Ready={p4Ready} role={role} vendors={vendors} purchaseOrders={purchaseOrders} projects={projects} loading={loadingData} onNew={(t) => setModal(t)} onRefresh={fetchAll} />;
       case "settings":  return <SettingsPage role={role} profiles={profiles} currentUserId={session && session !== "loading" ? session.user.id : ""} p4Ready={p4Ready} onRefresh={fetchAll} />;
@@ -3177,8 +3794,10 @@ export default function App() {
             clients={clients}
             projects={projects}
             staff={staff}
+            p3bReady={p3bReady}
             onBack={() => setSelectedEvent(null)}
             onRefresh={fetchAll}
+            onGoLive={() => setLiveEvent(events.find((e: any) => e.id === selectedEvent.id) ?? selectedEvent)}
           />
         );
         return <EventsPage p3Ready={p3Ready} events={events} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("event")} onRefresh={fetchAll} onSelect={e => setSelectedEvent(e)} />;
@@ -3207,6 +3826,7 @@ export default function App() {
             onNew={(t) => setModal(t)}
             onRefresh={fetchAll}
             onSelectInvoice={(inv) => setSelectedInvoice(inv)}
+            onConvertQuotation={convertQuotationToInvoice}
           />
         );
       case "targets":
@@ -3287,6 +3907,7 @@ export default function App() {
       {modal === "revenue"  && <NewRevenueModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
       {modal === "cost"     && <NewCostModal projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
       {modal === "invoice"  && <NewInvoiceModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
+      {modal === "quotation" && <NewQuotationModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
       {modal === "target"   && <NewTargetModal onClose={() => setModal(null)} onSaved={fetchAll} />}
       {modal === "event"    && <NewEventModal clients={clients} projects={projects} staff={staff} onClose={() => setModal(null)} onSaved={fetchAll} />}
       {modal === "payroll"  && <NewPayrollModal staff={staff} onClose={() => setModal(null)} onSaved={fetchAll} />}

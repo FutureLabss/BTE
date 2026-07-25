@@ -48,6 +48,14 @@ const exportCSV = (rows: any[], filename: string) => {
   URL.revokeObjectURL(url);
 };
 
+// There's no pg_cron (or any server-side scheduler — the edge function resets on
+// every Figma save) to auto-flip a sent invoice to "overdue" when its due date
+// passes. Rather than requiring the founder to remember to change it by hand,
+// compute the *effective* status for display everywhere an invoice's status is
+// shown, without mutating the stored value until they actually act on it.
+const effectiveInvoiceStatus = (inv: { status: string; due_date: string }) =>
+  inv.status === "sent" && daysUntil(inv.due_date) <= 0 ? "overdue" : inv.status;
+
 type Pillar = "experiences" | "production" | "communications" | "brand_marketing" | "people_culture";
 
 const PILLARS: Record<Pillar, string> = {
@@ -1225,7 +1233,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Total Revenue</div><div className="text-xl font-bold text-white font-mono">{formatNaira(totalRev)}</div><div className="text-xs text-emerald-400 mt-1 font-mono">{formatNaira(totalReceived)} received</div></div>
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Total Costs</div><div className="text-xl font-bold text-white font-mono">{formatNaira(totalCost)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{costEntries.filter((e: any) => e.paid).length} paid</div></div>
         <div className="bg-[#10101C] border border-emerald-400/20 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Gross Margin</div><div className="text-xl font-bold text-emerald-400 font-mono">{formatNaira(totalRev - totalCost)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{totalRev > 0 ? Math.round(((totalRev - totalCost) / totalRev) * 100) : 0}% margin</div></div>
-        <div className="bg-[#10101C] border border-amber-400/20 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Outstanding</div><div className="text-xl font-bold text-amber-400 font-mono">{formatNaira(outstanding)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{invoices.filter((i: any) => i.status === "overdue").length} overdue</div></div>
+        <div className="bg-[#10101C] border border-amber-400/20 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Outstanding</div><div className="text-xl font-bold text-amber-400 font-mono">{formatNaira(outstanding)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{invoices.filter((i: any) => effectiveInvoiceStatus(i) === "overdue").length} overdue</div></div>
       </div>
 
       <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
@@ -1302,7 +1310,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{formatDate(inv.issued_date)}</td>
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{formatDate(inv.due_date)}</td>
                     <td className="px-5 py-3.5 text-sm font-mono font-semibold text-white">{formatNaira(inv.total)}</td>
-                    <td className="px-5 py-3.5"><StatusBadge status={inv.status} /></td>
+                    <td className="px-5 py-3.5"><StatusBadge status={effectiveInvoiceStatus(inv)} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -2654,7 +2662,7 @@ const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntrie
           <>
             <StatCard label="Revenue (Month)" value={formatNaira(monthRev)} sub={annualRevTarget ? `${Math.round((ytdRev / annualRevTarget.target_value) * 100)}% of annual target` : "No target set"} icon={DollarSign} trend={monthRev > monthCost ? "up" : "down"} trendLabel={`${formatNaira(monthRev - monthCost)} margin`} />
             <StatCard label="Costs (Month)" value={formatNaira(monthCost)} sub={`${costEntries.filter((e: any) => e.entry_month?.slice(0, 7) === thisMonth && !e.paid).length} unpaid`} icon={Receipt} trend="neutral" trendLabel="This month" />
-            <StatCard label="Outstanding" value={formatNaira(outstanding)} sub={`${invoices.filter((i: any) => i.status === "overdue").length} overdue invoices`} icon={BarChart3} trend={invoices.filter((i: any) => i.status === "overdue").length > 0 ? "down" : "neutral"} trendLabel="Sent & unpaid" />
+            <StatCard label="Outstanding" value={formatNaira(outstanding)} sub={`${invoices.filter((i: any) => effectiveInvoiceStatus(i) === "overdue").length} overdue invoices`} icon={BarChart3} trend={invoices.filter((i: any) => effectiveInvoiceStatus(i) === "overdue").length > 0 ? "down" : "neutral"} trendLabel="Sent & unpaid" />
             <StatCard label="Active Projects" value={String(active.length)} sub={flagged.length > 0 ? `${flagged.length} flagged` : "All on track"} icon={FolderOpen} trend={flagged.length > 0 ? "down" : "up"} trendLabel={flagged.length > 0 ? `${flagged.length} need attention` : "On track"} />
             <StatCard label="Open Pipeline" value={formatNaira(pipeline)} sub={`${openLeads.length} open leads`} icon={TrendingUp} trend="up" trendLabel={`${leads.filter((l: any) => l.stage === "negotiation").length} in negotiation`} />
             <StatCard label="Tasks Due (7d)" value={String(upcoming.filter((t: any) => daysUntil(t.due_date) <= 7).length)} sub="Next 7 days" icon={Clock} trend={upcoming.filter((t: any) => daysUntil(t.due_date) <= 0).length > 0 ? "down" : "neutral"} trendLabel={`${upcoming.filter((t: any) => daysUntil(t.due_date) <= 0).length} overdue`} />
@@ -2955,14 +2963,15 @@ const TASK_CYCLE: Record<string, string> = {
   blocked: "in_progress",
 };
 
-const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p4Ready, onBack, onRefresh, onAddTask }: {
-  project: any; tasks: any[]; clients: any[]; staff: any[]; vendors: any[]; p4Ready: boolean;
+const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p4Ready, onBack, onRefresh, onAddTask }: {
+  project: any; tasks: any[]; clients: any[]; staff: any[]; vendors: any[]; p2Ready: boolean; p4Ready: boolean;
   onBack: () => void; onRefresh: () => void; onAddTask: () => void;
 }) => {
   const [cycling, setCycling] = useState<string | null>(null);
   const [editingStatus, setEditingStatus] = useState(false);
   const [assignments, setAssignments] = useState<any[]>([]);
   const [projectVendors, setProjectVendors] = useState<any[]>([]);
+  const [financials, setFinancials] = useState<any | null>(null);
   const [loadingRel, setLoadingRel] = useState(true);
   const [assignForm, setAssignForm] = useState({ staff_id: "", role_on_project: "", allocation_pct: "" });
   const [vendorForm, setVendorForm] = useState({ vendor_id: "", engagement_notes: "", debrief_notes: "" });
@@ -2985,6 +2994,12 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p4Ready, o
     setLoadingRel(false);
   }, [project.id, p4Ready]);
   useEffect(() => { loadRel(); }, [loadRel]);
+
+  useEffect(() => {
+    if (!p2Ready) { setFinancials(null); return; }
+    supabase.from("v_project_financials").select("*").eq("project_id", project.id).maybeSingle()
+      .then(({ data }) => setFinancials(data));
+  }, [project.id, p2Ready]);
 
   const cycleTask = async (task: any) => {
     setCycling(task.id);
@@ -3063,6 +3078,18 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p4Ready, o
         </div>
         {project.notes && <p className="mt-4 text-sm text-[#B0ADCC] leading-relaxed">{project.notes}</p>}
       </div>
+
+      {p2Ready && financials && (
+        <div className="bg-[#10101C] border border-white/6 rounded-2xl p-5">
+          <div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-4">Financials</div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+            <div><div className="text-[#7070A0] font-mono mb-1">Revenue</div><div className="font-mono text-emerald-400">{formatNaira(Number(financials.revenue))}</div></div>
+            <div><div className="text-[#7070A0] font-mono mb-1">Cost</div><div className="font-mono text-red-400">{formatNaira(Number(financials.cost))}</div></div>
+            <div><div className="text-[#7070A0] font-mono mb-1">Margin</div><div className={`font-mono ${Number(financials.margin) >= 0 ? "text-white" : "text-red-400"}`}>{formatNaira(Number(financials.margin))}</div></div>
+            <div><div className="text-[#7070A0] font-mono mb-1">Budget Variance</div><div className={`font-mono ${financials.budget_variance == null ? "text-[#7070A0]" : Number(financials.budget_variance) >= 0 ? "text-emerald-400" : "text-red-400"}`}>{financials.budget_variance == null ? "—" : formatNaira(Number(financials.budget_variance))}</div></div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/6">
@@ -3767,6 +3794,7 @@ export default function App() {
             clients={clients}
             staff={staff}
             vendors={vendors}
+            p2Ready={p2Ready}
             p4Ready={p4Ready}
             onBack={() => setSelectedProject(null)}
             onRefresh={fetchAll}

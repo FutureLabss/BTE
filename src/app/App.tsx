@@ -5,7 +5,8 @@ import {
   ChevronRight, Search, Menu, AlertTriangle, CheckCircle2, Clock,
   ArrowUpRight, ArrowDownRight, Building2, BarChart3, Receipt,
   Mail, RefreshCw, LogOut, CheckCheck, Database, Loader2, Eye, EyeOff, Wallet,
-  MapPin, Users, Trash2, CalendarClock, PartyPopper, Download,
+  MapPin, Users, Trash2, CalendarClock, PartyPopper, Download, Pencil, Archive,
+  Upload, Link2, File, Wifi, WifiOff,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import type { Session } from "@supabase/supabase-js";
@@ -46,6 +47,15 @@ const exportCSV = (rows: any[], filename: string) => {
   a.href = url; a.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
   URL.revokeObjectURL(url);
+};
+
+// The PRD bans hard deletes from the UI — company records must stay recoverable.
+// "Delete" everywhere in this app means soft-delete: stamp archived_at and let every
+// list query's `.is("archived_at", null)` filter hide it. Nothing is ever removed
+// from Postgres by the client.
+const archiveRecord = async (table: string, id: string, onDone: () => void) => {
+  await supabase.from(table).update({ archived_at: new Date().toISOString() }).eq("id", id);
+  onDone();
 };
 
 // There's no pg_cron (or any server-side scheduler — the edge function resets on
@@ -150,6 +160,15 @@ const Modal = ({ title, onClose, children }: { title: string; onClose: () => voi
       </div>
       <div className="overflow-y-auto flex-1 p-6">{children}</div>
     </div>
+  </div>
+);
+
+// Consistent edit/archive icon pair for every list row across the app. Stops
+// propagation so it works inside rows whose own onClick opens a detail page.
+const RowActions = ({ onEdit, onArchive, archiveLabel = "this record" }: { onEdit?: () => void; onArchive?: () => void; archiveLabel?: string }) => (
+  <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+    {onEdit && <button onClick={onEdit} title="Edit" className="p-1.5 rounded-lg hover:bg-white/8 text-[#7070A0] hover:text-white transition-colors"><Pencil size={13} /></button>}
+    {onArchive && <button onClick={() => { if (window.confirm(`Archive ${archiveLabel}? It will be hidden from lists but can be restored later.`)) onArchive(); }} title="Archive" className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Archive size={13} /></button>}
   </div>
 );
 
@@ -324,6 +343,7 @@ DO $$ BEGIN CREATE TYPE staff_contract_type_enum AS ENUM ('core_staff','contract
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER LANGUAGE plpgsql AS $fn$ BEGIN NEW.updated_at = now(); RETURN NEW; END; $fn$;
 
 CREATE TABLE IF NOT EXISTS staff (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, role_title text, team text, pillar pillar, contract_type staff_contract_type_enum NOT NULL DEFAULT 'core_staff', start_date date, nda_signed boolean NOT NULL DEFAULT false, capacity_pct int CHECK (capacity_pct BETWEEN 0 AND 200), active boolean NOT NULL DEFAULT true, notes text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS staff_updated_at ON staff; CREATE TRIGGER staff_updated_at BEFORE UPDATE ON staff FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS clients (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, client_type client_type_enum NOT NULL DEFAULT 'corporate', pillar pillar NOT NULL, point_of_contact text, contact_email text, contact_phone text, billing_details jsonb, status client_status_enum NOT NULL DEFAULT 'prospect', notes text, archived_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
@@ -342,6 +362,7 @@ CREATE TABLE IF NOT EXISTS projects (id uuid PRIMARY KEY DEFAULT gen_random_uuid
 DROP TRIGGER IF EXISTS projects_updated_at ON projects; CREATE TRIGGER projects_updated_at BEFORE UPDATE ON projects FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE, title text NOT NULL, assignee_id uuid REFERENCES staff(id) ON DELETE SET NULL, due_date date, status task_status_enum NOT NULL DEFAULT 'not_started', priority task_priority_enum NOT NULL DEFAULT 'medium', notes text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS tasks_updated_at ON tasks; CREATE TRIGGER tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 ALTER TABLE staff ENABLE ROW LEVEL SECURITY; ALTER TABLE clients ENABLE ROW LEVEL SECURITY; ALTER TABLE leads ENABLE ROW LEVEL SECURITY; ALTER TABLE proposals ENABLE ROW LEVEL SECURITY; ALTER TABLE contracts ENABLE ROW LEVEL SECURITY; ALTER TABLE projects ENABLE ROW LEVEL SECURITY; ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
@@ -523,21 +544,25 @@ const SetupScreen = ({ onComplete }: { onComplete: () => void }) => {
 
 // ─── CRUD Forms ───────────────────────────────────────────────────────────────
 
-const NewClientModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ name: "", client_type: "corporate", pillar: "experiences", point_of_contact: "", contact_email: "", contact_phone: "", status: "prospect" });
+const NewClientModal = ({ record, onClose, onSaved }: { record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    name: record?.name ?? "", client_type: record?.client_type ?? "corporate", pillar: record?.pillar ?? "experiences",
+    point_of_contact: record?.point_of_contact ?? "", contact_email: record?.contact_email ?? "", contact_phone: record?.contact_phone ?? "", status: record?.status ?? "prospect",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("clients").insert({ name: f.name, client_type: f.client_type as any, pillar: f.pillar as any, point_of_contact: f.point_of_contact || null, contact_email: f.contact_email || null, contact_phone: f.contact_phone || null, status: f.status as any });
+    const payload = { name: f.name, client_type: f.client_type as any, pillar: f.pillar as any, point_of_contact: f.point_of_contact || null, contact_email: f.contact_email || null, contact_phone: f.contact_phone || null, status: f.status as any };
+    const { error } = record ? await supabase.from("clients").update(payload).eq("id", record.id) : await supabase.from("clients").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="New Client" onClose={onClose}>
+    <Modal title={record ? "Edit Client" : "New Client"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Client Name *"><input required className={inputCls} placeholder="Sheedx Africa" value={f.name} onChange={e => set("name", e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
@@ -550,7 +575,7 @@ const NewClientModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: ()
         <Field label="Phone"><input className={inputCls} placeholder="+234 800 000 0000" value={f.contact_phone} onChange={e => set("contact_phone", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : "Create Client"}
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Client"}
         </button>
       </form>
     </Modal>
@@ -591,21 +616,26 @@ const NewLeadModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   );
 };
 
-const NewProjectModal = ({ onClose, onSaved, clients, staff }: { onClose: () => void; onSaved: () => void; clients: any[]; staff: any[] }) => {
-  const [f, setF] = useState({ name: "", client_id: "", pillar: "experiences", project_lead_id: "", deadline: "", budget: "", status: "not_started", is_event: "false" });
+const NewProjectModal = ({ record, onClose, onSaved, clients, staff }: { record?: any; onClose: () => void; onSaved: () => void; clients: any[]; staff: any[] }) => {
+  const [f, setF] = useState({
+    name: record?.name ?? "", client_id: record?.client_id ?? "", pillar: record?.pillar ?? "experiences",
+    project_lead_id: record?.project_lead_id ?? "", deadline: record?.deadline ?? "", budget: record?.budget ? String(record.budget) : "",
+    status: record?.status ?? "not_started", is_event: record ? String(!!record.is_event) : "false",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("projects").insert({ name: f.name, client_id: f.client_id || null, pillar: f.pillar as any, project_lead_id: f.project_lead_id || null, deadline: f.deadline || null, budget: f.budget ? parseFloat(f.budget) : null, status: f.status as any, is_event: f.is_event === "true" });
+    const payload = { name: f.name, client_id: f.client_id || null, pillar: f.pillar as any, project_lead_id: f.project_lead_id || null, deadline: f.deadline || null, budget: f.budget ? parseFloat(f.budget) : null, status: f.status as any, is_event: f.is_event === "true" };
+    const { error } = record ? await supabase.from("projects").update(payload).eq("id", record.id) : await supabase.from("projects").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="New Project" onClose={onClose}>
+    <Modal title={record ? "Edit Project" : "New Project"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Project Name *"><input required className={inputCls} placeholder="Sheedx Africa Summit 2026" value={f.name} onChange={e => set("name", e.target.value)} /></Field>
         <Field label="Client"><select className={selectCls} value={f.client_id} onChange={e => set("client_id", e.target.value)}><option value="">Internal / No client</option>{clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
@@ -621,15 +651,18 @@ const NewProjectModal = ({ onClose, onSaved, clients, staff }: { onClose: () => 
         <Field label="Is this an Event?"><select className={selectCls} value={f.is_event} onChange={e => set("is_event", e.target.value)}><option value="false">No</option><option value="true">Yes</option></select></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : "Create Project"}
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Project"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const NewTaskModal = ({ onClose, onSaved, projects, staff }: { onClose: () => void; onSaved: () => void; projects: any[]; staff: any[] }) => {
-  const [f, setF] = useState({ title: "", project_id: projects[0]?.id ?? "", assignee_id: "", due_date: "", priority: "medium", status: "not_started" });
+const NewTaskModal = ({ record, onClose, onSaved, projects, staff }: { record?: any; onClose: () => void; onSaved: () => void; projects: any[]; staff: any[] }) => {
+  const [f, setF] = useState({
+    title: record?.title ?? "", project_id: record?.project_id ?? projects[0]?.id ?? "", assignee_id: record?.assignee_id ?? "",
+    due_date: record?.due_date ?? "", priority: record?.priority ?? "medium", status: record?.status ?? "not_started",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
@@ -638,13 +671,14 @@ const NewTaskModal = ({ onClose, onSaved, projects, staff }: { onClose: () => vo
     e.preventDefault();
     if (!f.project_id) { setErr("Select a project."); return; }
     setSaving(true);
-    const { error } = await supabase.from("tasks").insert({ title: f.title, project_id: f.project_id, assignee_id: f.assignee_id || null, due_date: f.due_date || null, priority: f.priority as any, status: f.status as any });
+    const payload = { title: f.title, project_id: f.project_id, assignee_id: f.assignee_id || null, due_date: f.due_date || null, priority: f.priority as any, status: f.status as any };
+    const { error } = record ? await supabase.from("tasks").update(payload).eq("id", record.id) : await supabase.from("tasks").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="Add Task" onClose={onClose}>
+    <Modal title={record ? "Edit Task" : "Add Task"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Task Title *"><input required className={inputCls} placeholder="Book venue for summit" value={f.title} onChange={e => set("title", e.target.value)} /></Field>
         <Field label="Project *"><select required className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">Select project…</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
@@ -653,9 +687,62 @@ const NewTaskModal = ({ onClose, onSaved, projects, staff }: { onClose: () => vo
           <Field label="Priority"><select className={selectCls} value={f.priority} onChange={e => set("priority", e.target.value)}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></Field>
           <Field label="Due Date"><input type="date" className={inputCls} value={f.due_date} onChange={e => set("due_date", e.target.value)} /></Field>
         </div>
+        {record && <Field label="Status"><select className={selectCls} value={f.status} onChange={e => set("status", e.target.value)}><option value="not_started">Not Started</option><option value="in_progress">In Progress</option><option value="blocked">Blocked</option><option value="done">Done</option></select></Field>}
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : "Add Task"}
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Add Task"}
+        </button>
+      </form>
+    </Modal>
+  );
+};
+
+const NewStaffModal = ({ record, onClose, onSaved }: { record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    name: record?.name ?? "", role_title: record?.role_title ?? "", team: record?.team ?? "", pillar: record?.pillar ?? "",
+    contract_type: record?.contract_type ?? "core_staff", start_date: record?.start_date ?? "",
+    capacity_pct: record?.capacity_pct != null ? String(record.capacity_pct) : "", active: record ? String(!!record.active) : "true",
+    nda_signed: record ? String(!!record.nda_signed) : "false",
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setSaving(true);
+    const payload = {
+      name: f.name, role_title: f.role_title || null, team: f.team || null, pillar: f.pillar || null,
+      contract_type: f.contract_type as any, start_date: f.start_date || null,
+      capacity_pct: f.capacity_pct ? parseInt(f.capacity_pct, 10) : null, active: f.active === "true", nda_signed: f.nda_signed === "true",
+    };
+    const { error } = record ? await supabase.from("staff").update(payload).eq("id", record.id) : await supabase.from("staff").insert(payload);
+    setSaving(false);
+    if (error) setErr(error.message); else { onSaved(); onClose(); }
+  };
+
+  return (
+    <Modal title={record ? "Edit Staff Member" : "New Staff Member"} onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <Field label="Name *"><input required className={inputCls} placeholder="Full name" value={f.name} onChange={e => set("name", e.target.value)} /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Role Title"><input className={inputCls} placeholder="Producer" value={f.role_title} onChange={e => set("role_title", e.target.value)} /></Field>
+          <Field label="Team"><input className={inputCls} placeholder="Blueprint by BTE" value={f.team} onChange={e => set("team", e.target.value)} /></Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}><option value="">None</option>{Object.entries(PILLARS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
+          <Field label="Contract Type"><select className={selectCls} value={f.contract_type} onChange={e => set("contract_type", e.target.value)}><option value="core_staff">Core Staff</option><option value="contractor">Contractor</option><option value="freelancer">Freelancer</option><option value="ace_collective">ACE Collective</option></select></Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start Date"><input type="date" className={inputCls} value={f.start_date} onChange={e => set("start_date", e.target.value)} /></Field>
+          <Field label="Capacity %"><input type="number" className={inputCls} placeholder="100" value={f.capacity_pct} onChange={e => set("capacity_pct", e.target.value)} /></Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Active"><select className={selectCls} value={f.active} onChange={e => set("active", e.target.value)}><option value="true">Yes</option><option value="false">No</option></select></Field>
+          <Field label="NDA Signed"><select className={selectCls} value={f.nda_signed} onChange={e => set("nda_signed", e.target.value)}><option value="false">No</option><option value="true">Yes</option></select></Field>
+        </div>
+        {err && <p className="text-sm text-red-400">{err}</p>}
+        <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Add Staff Member"}
         </button>
       </form>
     </Modal>
@@ -685,15 +772,18 @@ DROP TRIGGER IF EXISTS invoices_updated_at ON invoices; CREATE TRIGGER invoices_
 CREATE TABLE IF NOT EXISTS invoice_line_items (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, description text NOT NULL, qty numeric(10,2) NOT NULL DEFAULT 1, unit_price numeric(14,2) NOT NULL DEFAULT 0, line_total numeric(14,2) GENERATED ALWAYS AS (qty * unit_price) STORED, sort_order int NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
 
 CREATE TABLE IF NOT EXISTS revenue_entries (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), description text NOT NULL, client_id uuid REFERENCES clients(id) ON DELETE SET NULL, project_id uuid REFERENCES projects(id) ON DELETE SET NULL, pillar pillar NOT NULL, revenue_type revenue_type_enum NOT NULL DEFAULT 'project_fee', entry_month date NOT NULL, amount numeric(14,2) NOT NULL, payment_status rev_payment_status_enum NOT NULL DEFAULT 'invoiced', invoice_id uuid REFERENCES invoices(id) ON DELETE SET NULL, received_date date, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE revenue_entries ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS revenue_entries_updated_at ON revenue_entries; CREATE TRIGGER revenue_entries_updated_at BEFORE UPDATE ON revenue_entries FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS cost_entries (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), description text NOT NULL, project_id uuid REFERENCES projects(id) ON DELETE SET NULL, pillar pillar NOT NULL, category cost_category_enum NOT NULL DEFAULT 'project_cost', amount numeric(14,2) NOT NULL, entry_month date NOT NULL, paid boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS cost_entries_updated_at ON cost_entries; CREATE TRIGGER cost_entries_updated_at BEFORE UPDATE ON cost_entries FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS quotations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), title text NOT NULL, client_id uuid NOT NULL REFERENCES clients(id) ON DELETE RESTRICT, project_id uuid REFERENCES projects(id) ON DELETE SET NULL, version int NOT NULL DEFAULT 1, status quot_status_enum NOT NULL DEFAULT 'draft', subtotal numeric(14,2) NOT NULL DEFAULT 0, total numeric(14,2) NOT NULL DEFAULT 0, notes text, archived_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 DROP TRIGGER IF EXISTS quotations_updated_at ON quotations; CREATE TRIGGER quotations_updated_at BEFORE UPDATE ON quotations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS targets (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), year int NOT NULL, month int, pillar pillar, metric target_metric_enum NOT NULL, target_value numeric(14,2) NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(year, month, pillar, metric));
+ALTER TABLE targets ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS targets_updated_at ON targets; CREATE TRIGGER targets_updated_at BEFORE UPDATE ON targets FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY; ALTER TABLE invoice_line_items ENABLE ROW LEVEL SECURITY; ALTER TABLE revenue_entries ENABLE ROW LEVEL SECURITY; ALTER TABLE cost_entries ENABLE ROW LEVEL SECURITY; ALTER TABLE quotations ENABLE ROW LEVEL SECURITY; ALTER TABLE targets ENABLE ROW LEVEL SECURITY;
@@ -781,27 +871,32 @@ const QuickAddModal = ({ onClose, onAction }: { onClose: () => void; onAction: (
 
 // ─── Phase 2 Modals ───────────────────────────────────────────────────────────
 
-const NewRevenueModal = ({ clients, projects, onClose, onSaved }: { clients: any[]; projects: any[]; onClose: () => void; onSaved: () => void }) => {
+const NewRevenueModal = ({ clients, projects, record, onClose, onSaved }: { clients: any[]; projects: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
   const today = new Date().toISOString().slice(0, 7) + "-01";
-  const [f, setF] = useState({ description: "", amount: "", pillar: "experiences", client_id: "", project_id: "", revenue_type: "project_fee", entry_month: today.slice(0,7), payment_status: "invoiced" });
+  const [f, setF] = useState({
+    description: record?.description ?? "", amount: record?.amount != null ? String(record.amount) : "", pillar: record?.pillar ?? "experiences",
+    client_id: record?.client_id ?? "", project_id: record?.project_id ?? "", revenue_type: record?.revenue_type ?? "project_fee",
+    entry_month: (record?.entry_month ?? today).slice(0, 7), payment_status: record?.payment_status ?? "invoiced",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("revenue_entries").insert({
+    const payload = {
       description: f.description, amount: parseFloat(f.amount), pillar: f.pillar as any,
       client_id: f.client_id || null, project_id: f.project_id || null,
       revenue_type: f.revenue_type as any, entry_month: f.entry_month + "-01",
       payment_status: f.payment_status as any,
-    });
+    };
+    const { error } = record ? await supabase.from("revenue_entries").update(payload).eq("id", record.id) : await supabase.from("revenue_entries").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="Log Revenue" onClose={onClose}>
+    <Modal title={record ? "Edit Revenue Entry" : "Log Revenue"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Description *"><input required className={inputCls} placeholder="Sheedx Africa Summit — Production fee" value={f.description} onChange={e => set("description", e.target.value)} /></Field>
         <Field label="Amount (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="12500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
@@ -817,33 +912,37 @@ const NewRevenueModal = ({ clients, projects, onClose, onSaved }: { clients: any
         <Field label="Project"><select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">— None —</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <ArrowUpRight size={15} />}{saving ? "Saving…" : "Log Revenue"}
+          {saving ? <Spinner /> : <ArrowUpRight size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Log Revenue"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const NewCostModal = ({ projects, onClose, onSaved }: { projects: any[]; onClose: () => void; onSaved: () => void }) => {
+const NewCostModal = ({ projects, record, onClose, onSaved }: { projects: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
   const today = new Date().toISOString().slice(0, 7);
-  const [f, setF] = useState({ description: "", amount: "", pillar: "experiences", project_id: "", category: "project_cost", entry_month: today, paid: "false" });
+  const [f, setF] = useState({
+    description: record?.description ?? "", amount: record?.amount != null ? String(record.amount) : "", pillar: record?.pillar ?? "experiences",
+    project_id: record?.project_id ?? "", category: record?.category ?? "project_cost", entry_month: (record?.entry_month ?? today).slice(0, 7), paid: record ? String(!!record.paid) : "false",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("cost_entries").insert({
+    const payload = {
       description: f.description, amount: parseFloat(f.amount), pillar: f.pillar as any,
       project_id: f.project_id || null, category: f.category as any,
       entry_month: f.entry_month + "-01", paid: f.paid === "true",
-    });
+    };
+    const { error } = record ? await supabase.from("cost_entries").update(payload).eq("id", record.id) : await supabase.from("cost_entries").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="Log Cost" onClose={onClose}>
+    <Modal title={record ? "Edit Cost Entry" : "Log Cost"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Description *"><input required className={inputCls} placeholder="Venue deposit — NICON Luxury Hotel" value={f.description} onChange={e => set("description", e.target.value)} /></Field>
         <Field label="Amount (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="3500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
@@ -858,17 +957,22 @@ const NewCostModal = ({ projects, onClose, onSaved }: { projects: any[]; onClose
         <Field label="Project (optional)"><select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">— None / Overhead —</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <ArrowDownRight size={15} />}{saving ? "Saving…" : "Log Cost"}
+          {saving ? <Spinner /> : <ArrowDownRight size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Log Cost"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const NewInvoiceModal = ({ clients, projects, onClose, onSaved }: { clients: any[]; projects: any[]; onClose: () => void; onSaved: () => void }) => {
+const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSaved }: { clients: any[]; projects: any[]; record?: any; recordLines?: any[]; onClose: () => void; onSaved: () => void }) => {
   const [step, setStep] = useState<1|2>(1);
-  const [head, setHead] = useState({ client_id: "", project_id: "", due_date: "", notes: "", status: "draft" });
-  const [lines, setLines] = useState([{ description: "", qty: "1", unit_price: "" }]);
+  const [head, setHead] = useState({
+    client_id: record?.client_id ?? "", project_id: record?.project_id ?? "", due_date: record?.due_date ?? "",
+    notes: record?.notes ?? "", status: record?.status ?? "draft",
+  });
+  const [lines, setLines] = useState(
+    recordLines && recordLines.length ? recordLines.map(l => ({ description: l.description, qty: String(l.qty), unit_price: String(l.unit_price) })) : [{ description: "", qty: "1", unit_price: "" }]
+  );
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const setH = (k: string, v: string) => setHead(p => ({ ...p, [k]: v }));
@@ -879,14 +983,18 @@ const NewInvoiceModal = ({ clients, projects, onClose, onSaved }: { clients: any
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
-    const { data: inv, error: e1 } = await supabase.from("invoices").insert({
+    const headPayload = {
       client_id: head.client_id, project_id: head.project_id || null,
       due_date: head.due_date, notes: head.notes || null,
       status: head.status as any, subtotal, total: subtotal,
-    }).select().single();
-    if (e1 || !inv) { setSaving(false); setErr(e1?.message ?? "Failed to create invoice"); return; }
+    };
+    const invId = record
+      ? (await supabase.from("invoices").update(headPayload).eq("id", record.id).select().single()).data?.id
+      : (await supabase.from("invoices").insert(headPayload).select().single()).data?.id;
+    if (!invId) { setSaving(false); setErr("Failed to save invoice"); return; }
+    if (record) await supabase.from("invoice_line_items").delete().eq("invoice_id", invId);
     const lineData = lines.filter(l => l.description && l.unit_price).map((l, i) => ({
-      invoice_id: inv.id, description: l.description,
+      invoice_id: invId, description: l.description,
       qty: parseFloat(l.qty || "1"), unit_price: parseFloat(l.unit_price), sort_order: i,
     }));
     if (lineData.length) await supabase.from("invoice_line_items").insert(lineData);
@@ -895,7 +1003,7 @@ const NewInvoiceModal = ({ clients, projects, onClose, onSaved }: { clients: any
   };
 
   return (
-    <Modal title="New Invoice" onClose={onClose}>
+    <Modal title={record ? `Edit Invoice ${record.invoice_number}` : "New Invoice"} onClose={onClose}>
       {step === 1 ? (
         <div className="space-y-4">
           <Field label="Client *">
@@ -946,7 +1054,7 @@ const NewInvoiceModal = ({ clients, projects, onClose, onSaved }: { clients: any
           <div className="flex gap-3">
             <button type="button" onClick={() => setStep(1)} className="px-4 py-2.5 rounded-xl border border-white/10 text-[#7070A0] text-sm hover:bg-white/5 transition-colors">← Back</button>
             <button type="submit" disabled={saving || lines.every(l => !l.description)} className="flex-1 py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-              {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Creating…" : "Create Invoice"}
+              {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Invoice"}
             </button>
           </div>
         </form>
@@ -955,26 +1063,30 @@ const NewInvoiceModal = ({ clients, projects, onClose, onSaved }: { clients: any
   );
 };
 
-const NewTargetModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ year: String(new Date().getFullYear()), month: "", pillar: "", metric: "revenue", target_value: "" });
+const NewTargetModal = ({ record, onClose, onSaved }: { record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    year: String(record?.year ?? new Date().getFullYear()), month: record?.month != null ? String(record.month) : "",
+    pillar: record?.pillar ?? "", metric: record?.metric ?? "revenue", target_value: record?.target_value != null ? String(record.target_value) : "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("targets").insert({
+    const payload = {
       year: parseInt(f.year), month: f.month ? parseInt(f.month) : null,
       pillar: f.pillar as any || null, metric: f.metric as any,
       target_value: parseFloat(f.target_value),
-    });
+    };
+    const { error } = record ? await supabase.from("targets").update(payload).eq("id", record.id) : await supabase.from("targets").insert(payload);
     setSaving(false);
     if (error) setErr(error.message.includes("unique") ? "A target for this combination already exists." : error.message);
     else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="Set Target" onClose={onClose}>
+    <Modal title={record ? "Edit Target" : "Set Target"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Year *"><input required type="number" className={inputCls} value={f.year} onChange={e => set("year", e.target.value)} /></Field>
@@ -996,15 +1108,18 @@ const NewTargetModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: ()
         <Field label="Target Value (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="50000000" value={f.target_value} onChange={e => set("target_value", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Target size={15} />}{saving ? "Saving…" : "Set Target"}
+          {saving ? <Spinner /> : <Target size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Set Target"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const NewQuotationModal = ({ clients, projects, onClose, onSaved }: { clients: any[]; projects: any[]; onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ title: "", client_id: "", project_id: "", total: "", notes: "", status: "draft" });
+const NewQuotationModal = ({ clients, projects, record, onClose, onSaved }: { clients: any[]; projects: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    title: record?.title ?? "", client_id: record?.client_id ?? "", project_id: record?.project_id ?? "",
+    total: record?.total != null ? String(record.total) : "", notes: record?.notes ?? "", status: record?.status ?? "draft",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
@@ -1012,16 +1127,17 @@ const NewQuotationModal = ({ clients, projects, onClose, onSaved }: { clients: a
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
     const total = parseFloat(f.total || "0");
-    const { error } = await supabase.from("quotations").insert({
+    const payload = {
       title: f.title, client_id: f.client_id, project_id: f.project_id || null,
       subtotal: total, total, notes: f.notes || null, status: f.status as any,
-    });
+    };
+    const { error } = record ? await supabase.from("quotations").update(payload).eq("id", record.id) : await supabase.from("quotations").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="New Quotation" onClose={onClose}>
+    <Modal title={record ? "Edit Quotation" : "New Quotation"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Title *"><input required className={inputCls} placeholder="Sheedx Africa Summit — Full Production Quote" value={f.title} onChange={e => set("title", e.target.value)} /></Field>
         <Field label="Client *">
@@ -1041,7 +1157,7 @@ const NewQuotationModal = ({ clients, projects, onClose, onSaved }: { clients: a
         <Field label="Notes"><input className={inputCls} placeholder="Scope summary, terms…" value={f.notes} onChange={e => set("notes", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Creating…" : "Create Quotation"}
+          {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Quotation"}
         </button>
       </form>
     </Modal>
@@ -1189,9 +1305,11 @@ const InvoiceDetailPage = ({ invoice, lineItems, clients, projects, onBack, onRe
 
 // ─── Finance Page ─────────────────────────────────────────────────────────────
 
-const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems, quotations, clients, projects, loading, onNew, onRefresh, onSelectInvoice, onConvertQuotation }: {
+const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems, quotations, clients, projects, loading, onNew, onRefresh, onSelectInvoice, onConvertQuotation, onEditRevenue, onArchiveRevenue, onEditCost, onArchiveCost, onEditInvoice, onArchiveInvoice, onEditQuotation, onArchiveQuotation }: {
   p2Ready: boolean; revenueEntries: any[]; costEntries: any[]; invoices: any[]; lineItems: any[]; quotations: any[]; clients: any[]; projects: any[];
   loading: boolean; onNew: (t: string) => void; onRefresh: () => void; onSelectInvoice: (inv: any) => void; onConvertQuotation: (q: any) => void;
+  onEditRevenue: (e: any) => void; onArchiveRevenue: (e: any) => void; onEditCost: (e: any) => void; onArchiveCost: (e: any) => void;
+  onEditInvoice: (inv: any) => void; onArchiveInvoice: (inv: any) => void; onEditQuotation: (q: any) => void; onArchiveQuotation: (q: any) => void;
 }) => {
   const [tab, setTab] = useState<"revenue"|"costs"|"invoices"|"quotations">("revenue");
   const [converting, setConverting] = useState<string | null>(null);
@@ -1255,7 +1373,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
             </div>
           ) : (
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Description","Client","Pillar","Month","Amount","Status"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Description","Client","Pillar","Month","Amount","Status",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {revenueEntries.map((e: any) => (
                   <tr key={e.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
@@ -1265,6 +1383,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{e.entry_month ? new Date(e.entry_month).toLocaleDateString("en-GB",{month:"short",year:"numeric"}) : "—"}</td>
                     <td className="px-5 py-3.5 text-sm font-mono font-semibold text-emerald-400">{formatNaira(e.amount)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={e.payment_status} /></td>
+                    <td className="px-5 py-3.5"><RowActions onEdit={() => onEditRevenue(e)} onArchive={() => onArchiveRevenue(e)} archiveLabel={e.description} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -1278,7 +1397,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
             </div>
           ) : (
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Description","Project","Category","Month","Amount","Paid"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Description","Project","Category","Month","Amount","Paid",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {costEntries.map((e: any) => (
                   <tr key={e.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
@@ -1288,6 +1407,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{e.entry_month ? new Date(e.entry_month).toLocaleDateString("en-GB",{month:"short",year:"numeric"}) : "—"}</td>
                     <td className="px-5 py-3.5 text-sm font-mono font-semibold text-red-400">{formatNaira(e.amount)}</td>
                     <td className="px-5 py-3.5"><span className={`text-xs font-mono ${e.paid ? "text-emerald-400" : "text-[#7070A0]"}`}>{e.paid ? "Paid" : "Unpaid"}</span></td>
+                    <td className="px-5 py-3.5"><RowActions onEdit={() => onEditCost(e)} onArchive={() => onArchiveCost(e)} archiveLabel={e.description} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -1301,7 +1421,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
             </div>
           ) : (
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Invoice #","Client","Issued","Due","Total","Status"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Invoice #","Client","Issued","Due","Total","Status",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {invoices.map((inv: any) => (
                   <tr key={inv.id} onClick={() => onSelectInvoice(inv)} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors cursor-pointer">
@@ -1311,6 +1431,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{formatDate(inv.due_date)}</td>
                     <td className="px-5 py-3.5 text-sm font-mono font-semibold text-white">{formatNaira(inv.total)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={effectiveInvoiceStatus(inv)} /></td>
+                    <td className="px-5 py-3.5"><RowActions onEdit={() => onEditInvoice(inv)} onArchive={() => onArchiveInvoice(inv)} archiveLabel={inv.invoice_number} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -1324,7 +1445,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
             </div>
           ) : (
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Title","Client","Version","Total","Status",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Title","Client","Version","Total","Status","",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {quotations.map((q: any) => (
                   <tr key={q.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
@@ -1344,6 +1465,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                         </button>
                       )}
                     </td>
+                    <td className="px-5 py-3.5"><RowActions onEdit={() => onEditQuotation(q)} onArchive={() => onArchiveQuotation(q)} archiveLabel={q.title} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -1357,8 +1479,9 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
 
 // ─── Targets Page ─────────────────────────────────────────────────────────────
 
-const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loading }: {
+const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loading, onEdit, onArchive }: {
   p2Ready: boolean; targets: any[]; revenueEntries: any[]; onNew: () => void; onRefresh: () => void; loading: boolean;
+  onEdit: (t: any) => void; onArchive: (t: any) => void;
 }) => {
   if (!p2Ready) return (
     <div className="space-y-5">
@@ -1395,9 +1518,12 @@ const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loadi
             </div>
             <div className="text-xs font-mono text-[#7070A0] mt-1">{t.year}{t.month ? ` · ${months[t.month]}` : " · Annual"}</div>
           </div>
-          <div className="text-right flex-shrink-0">
-            <div className="text-sm font-bold font-mono text-white">{formatNaira(actual)}</div>
-            <div className="text-xs font-mono text-[#7070A0]">of {formatNaira(t.target_value)}</div>
+          <div className="flex items-start gap-2 flex-shrink-0">
+            <div className="text-right">
+              <div className="text-sm font-bold font-mono text-white">{formatNaira(actual)}</div>
+              <div className="text-xs font-mono text-[#7070A0]">of {formatNaira(t.target_value)}</div>
+            </div>
+            <RowActions onEdit={() => onEdit(t)} onArchive={() => onArchive(t)} archiveLabel={`this ${t.metric} target`} />
           </div>
         </div>
         <div className="h-2 bg-white/5 rounded-full overflow-hidden">
@@ -1413,6 +1539,7 @@ const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loadi
       <div className="flex items-center justify-between">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Targets</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Targets & Progress</h1></div>
         <div className="flex gap-2">
+          <button onClick={() => exportCSV(targets, "targets")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> Set Target</button>
         </div>
@@ -1534,27 +1661,33 @@ const EVENT_TYPES: Record<string, string> = {
   corporate: "Corporate", activation: "Activation", production: "Production", other: "Other",
 };
 
-const NewEventModal = ({ clients, projects, staff, onClose, onSaved }: { clients: any[]; projects: any[]; staff: any[]; onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ name: "", client_id: "", project_id: "", pillar: "experiences", event_type: "corporate", status: "planning", event_date: "", end_date: "", venue: "", city: "", expected_guests: "", budget: "", lead_id: "", brief: "" });
+const NewEventModal = ({ clients, projects, staff, record, onClose, onSaved }: { clients: any[]; projects: any[]; staff: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    name: record?.name ?? "", client_id: record?.client_id ?? "", project_id: record?.project_id ?? "", pillar: record?.pillar ?? "experiences",
+    event_type: record?.event_type ?? "corporate", status: record?.status ?? "planning", event_date: record?.event_date ?? "", end_date: record?.end_date ?? "",
+    venue: record?.venue ?? "", city: record?.city ?? "", expected_guests: record?.expected_guests != null ? String(record.expected_guests) : "",
+    budget: record?.budget != null ? String(record.budget) : "", lead_id: record?.lead_id ?? "", brief: record?.brief ?? "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
-    const { error } = await supabase.from("events").insert({
+    const payload = {
       name: f.name, client_id: f.client_id || null, project_id: f.project_id || null,
       pillar: f.pillar as any, event_type: f.event_type as any, status: f.status as any,
       event_date: f.event_date, end_date: f.end_date || null, venue: f.venue || null, city: f.city || null,
       expected_guests: f.expected_guests ? parseInt(f.expected_guests) : null,
       budget: f.budget ? parseFloat(f.budget) : null, lead_id: f.lead_id || null, brief: f.brief || null,
-    });
+    };
+    const { error } = record ? await supabase.from("events").update(payload).eq("id", record.id) : await supabase.from("events").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="New Event" onClose={onClose}>
+    <Modal title={record ? "Edit Event" : "New Event"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Event Name *"><input required className={inputCls} placeholder="e.g. Lagos Tech Summit 2026" value={f.name} onChange={e => set("name", e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
@@ -1582,16 +1715,16 @@ const NewEventModal = ({ clients, projects, staff, onClose, onSaved }: { clients
         <Field label="Brief"><textarea className={`${inputCls} min-h-20`} placeholder="Event objectives, scope, key notes…" value={f.brief} onChange={e => set("brief", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Calendar size={15} />}{saving ? "Saving…" : "Create Event"}
+          {saving ? <Spinner /> : <Calendar size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Event"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh, onSelect }: {
+const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh, onSelect, onEdit, onArchive }: {
   p3Ready: boolean; events: any[]; clients: any[]; staff: any[]; loading: boolean;
-  onNew: () => void; onRefresh: () => void; onSelect: (e: any) => void;
+  onNew: () => void; onRefresh: () => void; onSelect: (e: any) => void; onEdit: (e: any) => void; onArchive: (e: any) => void;
 }) => {
   const [filter, setFilter] = useState<string>("all");
   const clientMap = Object.fromEntries(clients.map((c: any) => [c.id, c.name]));
@@ -1616,6 +1749,7 @@ const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Events</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Events</h1></div>
         <div className="flex gap-2">
+          <button onClick={() => exportCSV(events, "events")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
           <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Event</button>
         </div>
@@ -1644,13 +1778,16 @@ const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh
           {shown.map((e: any) => {
             const d = daysUntil(e.event_date);
             return (
-              <button key={e.id} onClick={() => onSelect(e)} className="text-left bg-[#10101C] border border-white/6 rounded-2xl p-5 hover:border-white/12 transition-colors">
+              <div key={e.id} onClick={() => onSelect(e)} className="text-left bg-[#10101C] border border-white/6 rounded-2xl p-5 hover:border-white/12 transition-colors cursor-pointer">
                 <div className="flex items-start justify-between gap-3 mb-3">
                   <div className="min-w-0">
                     <div className="text-sm font-semibold text-white truncate" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{e.name}</div>
                     <div className="text-xs font-mono text-[#7070A0] mt-0.5">{EVENT_TYPES[e.event_type] ?? e.event_type}</div>
                   </div>
-                  <StatusBadge status={e.status} />
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <StatusBadge status={e.status} />
+                    <RowActions onEdit={() => onEdit(e)} onArchive={() => onArchive(e)} archiveLabel={e.name} />
+                  </div>
                 </div>
                 <div className="space-y-1.5 text-xs text-[#B0ADCC]">
                   <div className="flex items-center gap-2"><CalendarClock size={13} className="text-[#7070A0] flex-shrink-0" />{formatDate(e.event_date)}{e.status !== "completed" && e.status !== "cancelled" && d >= 0 && <span className="font-mono text-[#7070A0]">· {d === 0 ? "today" : `${d}d`}</span>}</div>
@@ -1662,7 +1799,7 @@ const EventsPage = ({ p3Ready, events, clients, staff, loading, onNew, onRefresh
                   <PillarBadge pillar={e.pillar} />
                   <span className="text-sm font-mono font-semibold text-white">{formatNaira(Number(e.budget || 0))}</span>
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -1694,8 +1831,9 @@ const parseAttendeeCSV = (text: string): { name: string; email: string; phone: s
 
 const EVENT_PERSON_ROLE_LABELS: Record<string, string> = { speaker: "Speaker", guest: "Guest", moderator: "Moderator", performer: "Performer" };
 
-const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, onRefresh, onGoLive }: {
+const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, onRefresh, onGoLive, onEdit, onArchive }: {
   event: any; clients: any[]; projects: any[]; staff: any[]; p3bReady: boolean; onBack: () => void; onRefresh: () => void; onGoLive: () => void;
+  onEdit: (e: any) => void; onArchive: (e: any) => void;
 }) => {
   const [crew, setCrew] = useState<any[]>([]);
   const [schedule, setSchedule] = useState<any[]>([]);
@@ -1795,6 +1933,7 @@ const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, on
             <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-2 text-white" defaultValue={event.status} onChange={e => updateStatus(e.target.value)}>
               {["planning","confirmed","in_progress","completed","cancelled"].map(s => <option key={s} value={s}>{STATUS_CFG[s]?.label}</option>)}
             </select>
+            <RowActions onEdit={() => onEdit(event)} onArchive={() => onArchive(event)} archiveLabel={event.name} />
           </div>
         </div>
 
@@ -2025,6 +2164,7 @@ CREATE TABLE IF NOT EXISTS purchase_orders (id uuid PRIMARY KEY DEFAULT gen_rand
 DROP TRIGGER IF EXISTS purchase_orders_updated_at ON purchase_orders; CREATE TRIGGER purchase_orders_updated_at BEFORE UPDATE ON purchase_orders FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS payroll_entries (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), staff_id uuid REFERENCES staff(id) ON DELETE SET NULL, payment_type payment_type_enum NOT NULL DEFAULT 'salary', gross_amount numeric(14,2) NOT NULL DEFAULT 0, wht_rate numeric(5,2) NOT NULL DEFAULT 0, wht_amount numeric(14,2) GENERATED ALWAYS AS (round(gross_amount * wht_rate / 100, 2)) STORED, net_amount numeric(14,2) GENERATED ALWAYS AS (gross_amount - round(gross_amount * wht_rate / 100, 2)) STORED, schedule pay_schedule_enum NOT NULL DEFAULT 'monthly', period_month date NOT NULL, payment_status pay_status_enum NOT NULL DEFAULT 'pending', payment_date date, payment_reference text, notes text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 DROP TRIGGER IF EXISTS payroll_entries_updated_at ON payroll_entries; CREATE TRIGGER payroll_entries_updated_at BEFORE UPDATE ON payroll_entries FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS project_assignments (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE, staff_id uuid NOT NULL REFERENCES staff(id) ON DELETE CASCADE, role_on_project text, allocation_pct int CHECK (allocation_pct BETWEEN 0 AND 100), created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(project_id, staff_id));
@@ -2157,6 +2297,100 @@ const P4SetupBanner = () => {
   );
 };
 
+// ─── Phase 5 Migration SQL (Knowledge Library) ─────────────────────────────────
+
+const MIGRATION_SQL_P5 = `-- BTE Admin Portal — Phase 5 Migration (Knowledge Library)
+-- Run AFTER Phase 4. Paste into: Supabase Dashboard → SQL Editor → Run
+
+CREATE TABLE IF NOT EXISTS library_items (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), item_type text NOT NULL CHECK (item_type IN ('link','file')), title text NOT NULL, description text, url text, storage_path text, category text, pillar pillar, created_by uuid REFERENCES profiles(id) ON DELETE SET NULL, created_at timestamptz NOT NULL DEFAULT now());
+
+INSERT INTO storage.buckets (id, name, public) VALUES ('library-files', 'library-files', false) ON CONFLICT DO NOTHING;
+
+ALTER TABLE library_items ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN CREATE POLICY "auth_all_library_items" ON library_items FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "library_files_select" ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'library-files'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "library_files_insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'library-files'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "library_files_delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'library-files'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`;
+
+const P5SetupBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P5); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-amber-400/20 rounded-2xl p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={18} className="text-amber-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <h3 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Phase 5 database not set up</h3>
+          <p className="text-sm text-[#7070A0]">Copy the SQL below and run it in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a>, then refresh.</p>
+        </div>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-xl p-4 overflow-auto max-h-48 whitespace-pre-wrap break-all">{MIGRATION_SQL_P5}</pre>
+        <button onClick={copy} className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={13} /> : <Database size={13} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+      <button onClick={() => window.location.reload()} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 text-[#7070A0] text-sm hover:bg-white/5 hover:text-white transition-colors">
+        <RefreshCw size={14} /> Refresh after running SQL
+      </button>
+    </div>
+  );
+};
+
+// ─── Phase 5b Migration SQL (Realtime + Auto-overdue Cron) ─────────────────────
+// Optional follow-up: enables Supabase Realtime on the tables the Command Centre
+// reads, and schedules a daily job that hits the server Edge Function's
+// /overdue-check route to flip stale project/invoice statuses. Requires the
+// updated server function (supabase/functions/server/index.tsx) to be deployed
+// first — this SQL alone has nothing to call otherwise.
+const MIGRATION_SQL_P5B = `-- BTE Admin Portal — Phase 5b Migration (Realtime + Auto-overdue Cron)
+-- Run AFTER Phase 5, and after deploying the updated server Edge Function.
+-- Paste into: Supabase Dashboard → SQL Editor → Run
+
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE clients; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE leads; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE projects; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE tasks; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE revenue_entries; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE cost_entries; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE invoices; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'bte-overdue-check';
+SELECT cron.schedule(
+  'bte-overdue-check',
+  '0 7 * * *',
+  $$ SELECT net.http_post(
+       url := 'https://zsgmzknzzlorneacmnzb.functions.supabase.co/make-server-ecee925a/overdue-check',
+       headers := jsonb_build_object('Content-Type','application/json')
+     ); $$
+);`;
+
+const P5bInfoBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P5B); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <RefreshCw size={18} className="text-[#FF4D00] flex-shrink-0 mt-0.5" />
+        <div>
+          <h3 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Optional: make the Command Centre live + auto-flag overdue items</h3>
+          <p className="text-sm text-[#7070A0]">Enables Supabase Realtime on the Command Centre's data and schedules a daily check that flips stale project/invoice statuses. First deploy the updated <code className="font-mono text-xs">supabase/functions/server</code> code, then run this once in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a>.</p>
+        </div>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-xl p-4 overflow-auto max-h-48 whitespace-pre-wrap break-all">{MIGRATION_SQL_P5B}</pre>
+        <button onClick={copy} className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={13} /> : <Database size={13} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ─── RBAC (UI-level) ──────────────────────────────────────────────────────────
 
 type Role = "founder" | "ops_lead" | "team_lead" | "member";
@@ -2197,9 +2431,13 @@ const PAYMENT_TYPE_LABELS: Record<string, string> = {
   salary: "Salary", contractor_fee: "Contractor Fee", freelance_fee: "Freelance Fee", bonus: "Bonus", reimbursement: "Reimbursement",
 };
 
-const NewPayrollModal = ({ staff, onClose, onSaved }: { staff: any[]; onClose: () => void; onSaved: () => void }) => {
+const NewPayrollModal = ({ staff, record, onClose, onSaved }: { staff: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
   const thisMonth = new Date().toISOString().slice(0, 7);
-  const [f, setF] = useState({ staff_id: "", payment_type: "salary", gross_amount: "", wht_rate: "0", schedule: "monthly", period_month: thisMonth, payment_status: "pending", payment_reference: "" });
+  const [f, setF] = useState({
+    staff_id: record?.staff_id ?? "", payment_type: record?.payment_type ?? "salary", gross_amount: record?.gross_amount != null ? String(record.gross_amount) : "",
+    wht_rate: record?.wht_rate != null ? String(record.wht_rate) : "0", schedule: record?.schedule ?? "monthly",
+    period_month: (record?.period_month ?? thisMonth).slice(0, 7), payment_status: record?.payment_status ?? "pending", payment_reference: record?.payment_reference ?? "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
@@ -2222,19 +2460,20 @@ const NewPayrollModal = ({ staff, onClose, onSaved }: { staff: any[]; onClose: (
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
-    const { error } = await supabase.from("payroll_entries").insert({
+    const payload = {
       staff_id: f.staff_id || null, payment_type: f.payment_type as any,
       gross_amount: gross, wht_rate: rate, schedule: f.schedule as any,
       period_month: f.period_month + "-01", payment_status: f.payment_status as any,
       payment_reference: f.payment_reference || null,
       payment_date: f.payment_status === "paid" ? new Date().toISOString().slice(0, 10) : null,
-    });
+    };
+    const { error } = record ? await supabase.from("payroll_entries").update(payload).eq("id", record.id) : await supabase.from("payroll_entries").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="Log Payroll" onClose={onClose}>
+    <Modal title={record ? "Edit Payroll Entry" : "Log Payroll"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Staff / Payee *">
           <select required className={selectCls} value={f.staff_id} onChange={e => onStaff(e.target.value)}>
@@ -2261,15 +2500,16 @@ const NewPayrollModal = ({ staff, onClose, onSaved }: { staff: any[]; onClose: (
         <Field label="Payment Reference"><input className={inputCls} placeholder="Transfer ref / cheque no." value={f.payment_reference} onChange={e => set("payment_reference", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Wallet size={15} />}{saving ? "Saving…" : "Log Payroll"}
+          {saving ? <Spinner /> : <Wallet size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Log Payroll"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const PayrollPage = ({ p4Ready, role, payroll, staff, loading, onNew, onRefresh }: {
+const PayrollPage = ({ p4Ready, role, payroll, staff, loading, onNew, onRefresh, onEdit, onArchive }: {
   p4Ready: boolean; role: Role; payroll: any[]; staff: any[]; loading: boolean; onNew: () => void; onRefresh: () => void;
+  onEdit: (e: any) => void; onArchive: (e: any) => void;
 }) => {
   if (!canAccess(role, "payroll")) return <NoAccess />;
   if (!p4Ready) return (
@@ -2325,7 +2565,12 @@ const PayrollPage = ({ p4Ready, role, payroll, staff, loading, onNew, onRefresh 
                     <td className="px-5 py-3.5 text-sm font-mono text-amber-400">−{formatNaira(Number(e.wht_amount))} <span className="text-[#7070A0]">({e.wht_rate}%)</span></td>
                     <td className="px-5 py-3.5 text-sm font-mono font-semibold text-emerald-400">{formatNaira(Number(e.net_amount))}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={e.payment_status} /></td>
-                    <td className="px-5 py-3.5">{e.payment_status === "pending" && <button onClick={() => markPaid(e.id)} className="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-400/10 text-emerald-400 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors">Mark Paid</button>}</td>
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-2">
+                        {e.payment_status === "pending" && <button onClick={() => markPaid(e.id)} className="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-400/10 text-emerald-400 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors">Mark Paid</button>}
+                        <RowActions onEdit={() => onEdit(e)} onArchive={() => onArchive(e)} archiveLabel="this payroll entry" />
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2339,23 +2584,27 @@ const PayrollPage = ({ p4Ready, role, payroll, staff, loading, onNew, onRefresh 
 
 // ─── Vendors & Purchase Orders ──────────────────────────────────────────────────
 
-const NewVendorModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ name: "", category: "", city: "", contact_name: "", contact_phone: "", contact_email: "", pillar: "", rating: "" });
+const NewVendorModal = ({ record, onClose, onSaved }: { record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    name: record?.name ?? "", category: record?.category ?? "", city: record?.city ?? "", contact_name: record?.contact_name ?? "",
+    contact_phone: record?.contact_phone ?? "", contact_email: record?.contact_email ?? "", pillar: record?.pillar ?? "", rating: record?.rating ? String(record.rating) : "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
-    const { error } = await supabase.from("vendors").insert({
+    const payload = {
       name: f.name, category: f.category || null, city: f.city || null,
       contact_name: f.contact_name || null, contact_phone: f.contact_phone || null, contact_email: f.contact_email || null,
       pillar: f.pillar as any || null, rating: f.rating ? parseInt(f.rating) : null,
-    });
+    };
+    const { error } = record ? await supabase.from("vendors").update(payload).eq("id", record.id) : await supabase.from("vendors").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
   return (
-    <Modal title="New Vendor" onClose={onClose}>
+    <Modal title={record ? "Edit Vendor" : "New Vendor"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Vendor Name *"><input required className={inputCls} placeholder="e.g. Zenith Sounds & Lighting" value={f.name} onChange={e => set("name", e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
@@ -2373,29 +2622,33 @@ const NewVendorModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: ()
         <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}><option value="">— None —</option>{Object.entries(PILLARS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Truck size={15} />}{saving ? "Saving…" : "Add Vendor"}
+          {saving ? <Spinner /> : <Truck size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Add Vendor"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const NewPOModal = ({ vendors, projects, onClose, onSaved }: { vendors: any[]; projects: any[]; onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ vendor_id: "", project_id: "", description: "", amount: "", status: "pending", notes: "" });
+const NewPOModal = ({ vendors, projects, record, onClose, onSaved }: { vendors: any[]; projects: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    vendor_id: record?.vendor_id ?? "", project_id: record?.project_id ?? "", description: record?.description ?? "",
+    amount: record?.amount != null ? String(record.amount) : "", status: record?.status ?? "pending", notes: record?.notes ?? "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true); setErr("");
-    const { error } = await supabase.from("purchase_orders").insert({
+    const payload = {
       vendor_id: f.vendor_id || null, project_id: f.project_id || null,
       description: f.description, amount: parseFloat(f.amount || "0"), status: f.status as any, notes: f.notes || null,
-    });
+    };
+    const { error } = record ? await supabase.from("purchase_orders").update(payload).eq("id", record.id) : await supabase.from("purchase_orders").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
   return (
-    <Modal title="New Purchase Order" onClose={onClose}>
+    <Modal title={record ? "Edit Purchase Order" : "New Purchase Order"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Vendor"><select className={selectCls} value={f.vendor_id} onChange={e => set("vendor_id", e.target.value)}><option value="">— Select vendor —</option>{vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</select></Field>
         <Field label="Project"><select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">— None —</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
@@ -2407,15 +2660,16 @@ const NewPOModal = ({ vendors, projects, onClose, onSaved }: { vendors: any[]; p
         <Field label="Notes"><input className={inputCls} value={f.notes} onChange={e => set("notes", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Creating…" : "Raise PO"}
+          {saving ? <Spinner /> : <Receipt size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Raise PO"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading, onNew, onRefresh }: {
+const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading, onNew, onRefresh, onEditVendor, onArchiveVendor, onEditPO, onArchivePO }: {
   p4Ready: boolean; role: Role; vendors: any[]; purchaseOrders: any[]; projects: any[]; loading: boolean; onNew: (t: string) => void; onRefresh: () => void;
+  onEditVendor: (v: any) => void; onArchiveVendor: (v: any) => void; onEditPO: (po: any) => void; onArchivePO: (po: any) => void;
 }) => {
   const [tab, setTab] = useState<"orders" | "vendors">("orders");
   if (!canAccess(role, "vendors")) return <NoAccess />;
@@ -2470,7 +2724,7 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[760px]">
-                <thead><tr className="border-b border-white/5">{["PO #","Vendor","Project","Amount","Status","Payment","Action"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+                <thead><tr className="border-b border-white/5">{["PO #","Vendor","Project","Amount","Status","Payment","Action",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
                 <tbody>
                   {purchaseOrders.map((po: any) => (
                     <tr key={po.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
@@ -2484,6 +2738,7 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
                         {po.status === "pending" && <button onClick={() => setPOStatus(po, "approved")} className="text-xs font-medium px-3 py-1.5 rounded-lg bg-emerald-400/10 text-emerald-400 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors">Approve</button>}
                         {po.status === "approved" && po.payment_status !== "paid" && <button onClick={() => setPOStatus(po, "paid")} className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white/5 text-white border border-white/10 hover:bg-white/8 transition-colors">Mark Paid</button>}
                       </td>
+                      <td className="px-5 py-3.5"><RowActions onEdit={() => onEditPO(po)} onArchive={() => onArchivePO(po)} archiveLabel={po.po_number} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2499,7 +2754,10 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
                 <div key={v.id} className="bg-white/2 border border-white/6 rounded-2xl p-4">
                   <div className="flex items-start justify-between gap-2 mb-1">
                     <div className="text-sm font-semibold text-white">{v.name}</div>
-                    {v.rating && <span className="text-xs font-mono text-amber-400">{"★".repeat(v.rating)}</span>}
+                    <div className="flex items-center gap-2">
+                      {v.rating && <span className="text-xs font-mono text-amber-400">{"★".repeat(v.rating)}</span>}
+                      <RowActions onEdit={() => onEditVendor(v)} onArchive={() => onArchiveVendor(v)} archiveLabel={v.name} />
+                    </div>
                   </div>
                   <div className="text-xs font-mono text-[#7070A0]">{v.category ?? "—"}{v.city ? ` · ${v.city}` : ""}</div>
                   {v.contact_phone && <div className="text-xs text-[#B0ADCC] mt-2 font-mono">{v.contact_phone}</div>}
@@ -2516,8 +2774,8 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
 
 // ─── Settings / Team (RBAC management) ──────────────────────────────────────────
 
-const SettingsPage = ({ role, profiles, currentUserId, p4Ready, onRefresh }: {
-  role: Role; profiles: any[]; currentUserId: string; p4Ready: boolean; onRefresh: () => void;
+const SettingsPage = ({ role, profiles, currentUserId, p4Ready, p5Ready, onRefresh }: {
+  role: Role; profiles: any[]; currentUserId: string; p4Ready: boolean; p5Ready: boolean; onRefresh: () => void;
 }) => {
   const changeRole = async (id: string, newRole: string) => { await supabase.from("profiles").update({ role: newRole }).eq("id", id); onRefresh(); };
   return (
@@ -2531,6 +2789,8 @@ const SettingsPage = ({ role, profiles, currentUserId, p4Ready, onRefresh }: {
       </div>
 
       {role === "founder" && p4Ready && <P4SecurityBanner />}
+
+      {role === "founder" && p5Ready && <P5bInfoBanner />}
 
       {role === "founder" && (
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
@@ -2588,10 +2848,10 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, trendLabel }: { label:
   </div>
 );
 
-const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntries, invoices, targets, p2Ready }: {
+const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntries, invoices, targets, p2Ready, realtimeConnected }: {
   clients: any[]; projects: any[]; leads: any[]; tasks: any[];
   revenueEntries: any[]; costEntries: any[]; invoices: any[]; targets: any[];
-  p2Ready: boolean;
+  p2Ready: boolean; realtimeConnected: boolean;
 }) => {
   const active = projects.filter(p => p.status !== "complete" && !p.archived_at);
   const flagged = active.filter(p => p.status === "at_risk" || p.status === "delayed");
@@ -2647,7 +2907,10 @@ const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntrie
             {new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </h1>
         </div>
-        <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" /><span className="text-xs font-mono text-[#7070A0]">Live</span></div>
+        <div className="flex items-center gap-2" title={realtimeConnected ? "Realtime connected" : "Realtime not connected — run the Phase 5b migration"}>
+          {realtimeConnected ? <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" /> : <WifiOff size={12} className="text-[#7070A0]" />}
+          <span className="text-xs font-mono text-[#7070A0]">{realtimeConnected ? "Live" : "Offline"}</span>
+        </div>
       </div>
 
       {flagged.length > 0 && (
@@ -2745,7 +3008,7 @@ const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntrie
 
 // ─── Clients Page ─────────────────────────────────────────────────────────────
 
-const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect }: { clients: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onSelect: (c: any) => void }) => {
+const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect, onEdit, onArchive }: { clients: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onSelect: (c: any) => void; onEdit: (c: any) => void; onArchive: (c: any) => void }) => {
   const [filter, setFilter] = useState("all");
   const filtered = filter === "all" ? clients : clients.filter((c: any) => c.status === filter);
   return (
@@ -2770,7 +3033,7 @@ const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect }: { clients
         : (
           <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Client","Pillar","Contact","Status"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Client","Pillar","Contact","Status",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>
                 {filtered.map((c: any) => (
                   <tr key={c.id} onClick={() => onSelect(c)} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors cursor-pointer">
@@ -2778,6 +3041,7 @@ const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect }: { clients
                     <td className="px-5 py-4"><PillarBadge pillar={c.pillar} /></td>
                     <td className="px-5 py-4"><div className="text-sm text-[#B0ADCC]">{c.point_of_contact ?? "—"}</div>{c.contact_email && <div className="text-xs text-[#7070A0] flex items-center gap-1 mt-0.5"><Mail size={10} />{c.contact_email}</div>}</td>
                     <td className="px-5 py-4"><StatusBadge status={c.status} /></td>
+                    <td className="px-5 py-4"><RowActions onEdit={() => onEdit(c)} onArchive={() => onArchive(c)} archiveLabel={c.name} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -2793,7 +3057,7 @@ const ClientsPage = ({ clients, loading, onNew, onRefresh, onSelect }: { clients
 
 const LEAD_STAGES = ["new","contacted","proposal_sent","negotiation","won","lost"] as const;
 
-const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead }: { leads: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onEditLead: (l: any) => void }) => {
+const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead, onArchiveLead }: { leads: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onEditLead: (l: any) => void; onArchiveLead: (l: any) => void }) => {
   const [view, setView] = useState<"kanban"|"list">("kanban");
   const pipeline = leads.reduce((a: number, l: any) => a + (l.estimated_value ?? 0), 0);
   return (
@@ -2819,7 +3083,10 @@ const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead }: { leads: an
                   <div className="space-y-3">
                     {items.map((l: any) => (
                       <div key={l.id} onClick={() => onEditLead(l)} className="bg-[#10101C] border border-white/6 rounded-xl p-4 hover:border-[#FF4D00]/30 transition-colors cursor-pointer">
-                        <div className="font-medium text-white text-sm">{l.name}</div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="font-medium text-white text-sm">{l.name}</div>
+                          <RowActions onArchive={() => onArchiveLead(l)} archiveLabel={l.name} />
+                        </div>
                         <div className="text-xs text-[#7070A0] mt-0.5">{l.organisation ?? "—"}</div>
                         {l.estimated_value && <div className="mt-2 font-mono text-sm font-semibold text-white">{formatNaira(l.estimated_value)}</div>}
                         <div className="mt-2"><PillarBadge pillar={l.pillar} /></div>
@@ -2835,14 +3102,15 @@ const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead }: { leads: an
         ) : (
           <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
             <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Lead","Pillar","Value","Stage","Next Action"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <thead><tr className="border-b border-white/5">{["Lead","Pillar","Value","Stage","Next Action",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
               <tbody>{leads.map((l: any) => (
-                <tr key={l.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors cursor-pointer">
+                <tr key={l.id} onClick={() => onEditLead(l)} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors cursor-pointer">
                   <td className="px-5 py-4"><div className="font-medium text-white text-sm">{l.name}</div><div className="text-xs text-[#7070A0]">{l.organisation ?? "—"}</div></td>
                   <td className="px-5 py-4"><PillarBadge pillar={l.pillar} /></td>
                   <td className="px-5 py-4 font-mono text-sm text-white">{l.estimated_value ? formatNaira(l.estimated_value) : "—"}</td>
                   <td className="px-5 py-4"><StatusBadge status={l.stage} /></td>
                   <td className="px-5 py-4 text-xs text-[#7070A0]">{l.next_action ?? "—"}</td>
+                  <td className="px-5 py-4"><RowActions onEdit={() => onEditLead(l)} onArchive={() => onArchiveLead(l)} archiveLabel={l.name} /></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -2855,7 +3123,7 @@ const LeadsPage = ({ leads, loading, onNew, onRefresh, onEditLead }: { leads: an
 
 // ─── Projects Page ────────────────────────────────────────────────────────────
 
-const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onSelect }: { projects: any[]; clients: any[]; staff: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onSelect: (p: any) => void }) => {
+const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onSelect, onEdit, onArchive }: { projects: any[]; clients: any[]; staff: any[]; loading: boolean; onNew: () => void; onRefresh: () => void; onSelect: (p: any) => void; onEdit: (p: any) => void; onArchive: (p: any) => void }) => {
   const [filter, setFilter] = useState("all");
   const filtered = filter === "all" ? projects : projects.filter((p: any) => p.status === filter);
   const clientMap = Object.fromEntries(clients.map((c: any) => [c.id, c.name]));
@@ -2895,7 +3163,7 @@ const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onS
                       </div>
                       <div className="text-xs text-[#7070A0] mt-1">{p.client_id ? (clientMap[p.client_id] ?? "Unknown") : "Internal"}{p.project_lead_id ? ` · ${staffMap[p.project_lead_id] ?? ""}` : ""}</div>
                     </div>
-                    <div className="flex items-center gap-2 flex-shrink-0"><StatusBadge status={p.status} /><PillarBadge pillar={p.pillar} /></div>
+                    <div className="flex items-center gap-2 flex-shrink-0"><StatusBadge status={p.status} /><PillarBadge pillar={p.pillar} /><RowActions onEdit={() => onEdit(p)} onArchive={() => onArchive(p)} archiveLabel={p.name} /></div>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 text-xs">
                     <div><div className="text-[#7070A0] font-mono mb-1">Budget</div><div className="font-mono text-white">{p.budget ? formatNaira(p.budget) : "—"}</div></div>
@@ -2917,11 +3185,17 @@ const ProjectsPage = ({ projects, clients, staff, loading, onNew, onRefresh, onS
 
 const CONTRACT_LABELS: Record<string, string> = { core_staff: "Core Staff", contractor: "Contractor", freelancer: "Freelancer", ace_collective: "ACE Collective" };
 
-const StaffPage = ({ staff, loading, onSelect }: { staff: any[]; loading: boolean; onSelect: (m: any) => void }) => (
+const StaffPage = ({ staff, loading, onSelect, onNew, onEdit, onArchive }: { staff: any[]; loading: boolean; onSelect: (m: any) => void; onNew: () => void; onEdit: (m: any) => void; onArchive: (m: any) => void }) => (
   <div className="space-y-5">
-    <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">People</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Staff — {staff.filter((s: any) => s.active).length} active</h1></div>
+    <div className="flex items-center justify-between">
+      <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">People</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Staff — {staff.filter((s: any) => s.active).length} active</h1></div>
+      <div className="flex gap-2">
+        <button onClick={() => exportCSV(staff, "staff")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
+        <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> Add Staff</button>
+      </div>
+    </div>
     {loading ? <div className="flex justify-center py-20"><Spinner /></div>
-      : staff.length === 0 ? <EmptyState icon={UserSquare2} title="No staff loaded" desc="Run the migration SQL in Supabase to seed 17 BTE staff members." />
+      : staff.length === 0 ? <EmptyState icon={UserSquare2} title="No staff loaded" desc="Run the migration SQL in Supabase to seed 17 BTE staff members." action={<button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> Add Staff</button>} />
       : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {staff.map((m: any) => (
@@ -2930,9 +3204,12 @@ const StaffPage = ({ staff, loading, onSelect }: { staff: any[]; loading: boolea
                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
                   {m.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
                 </div>
-                {m.capacity_pct != null && (
-                  <span className={`text-xs font-mono px-2 py-0.5 rounded-md border ${m.capacity_pct > 90 ? "text-red-400 bg-red-400/10 border-red-400/20" : m.capacity_pct > 70 ? "text-amber-400 bg-amber-400/10 border-amber-400/20" : "text-emerald-400 bg-emerald-400/10 border-emerald-400/20"}`}>{m.capacity_pct}%</span>
-                )}
+                <div className="flex items-center gap-2">
+                  {m.capacity_pct != null && (
+                    <span className={`text-xs font-mono px-2 py-0.5 rounded-md border ${m.capacity_pct > 90 ? "text-red-400 bg-red-400/10 border-red-400/20" : m.capacity_pct > 70 ? "text-amber-400 bg-amber-400/10 border-amber-400/20" : "text-emerald-400 bg-emerald-400/10 border-emerald-400/20"}`}>{m.capacity_pct}%</span>
+                  )}
+                  <RowActions onEdit={() => onEdit(m)} onArchive={() => onArchive(m)} archiveLabel={m.name} />
+                </div>
               </div>
               <div className="font-semibold text-white text-sm">{m.name}</div>
               <div className="text-xs text-[#7070A0] mt-0.5">{m.role_title ?? "—"}</div>
@@ -2963,9 +3240,10 @@ const TASK_CYCLE: Record<string, string> = {
   blocked: "in_progress",
 };
 
-const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p4Ready, onBack, onRefresh, onAddTask }: {
+const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p4Ready, onBack, onRefresh, onAddTask, onEditProject, onArchiveProject, onEditTask, onArchiveTask }: {
   project: any; tasks: any[]; clients: any[]; staff: any[]; vendors: any[]; p2Ready: boolean; p4Ready: boolean;
   onBack: () => void; onRefresh: () => void; onAddTask: () => void;
+  onEditProject: (p: any) => void; onArchiveProject: (p: any) => void; onEditTask: (t: any) => void; onArchiveTask: (t: any) => void;
 }) => {
   const [cycling, setCycling] = useState<string | null>(null);
   const [editingStatus, setEditingStatus] = useState(false);
@@ -3067,7 +3345,10 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p
               )}
             </div>
           </div>
-          <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors flex-shrink-0"><RefreshCw size={15} /></button>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
+            <RowActions onEdit={() => onEditProject(project)} onArchive={() => onArchiveProject(project)} archiveLabel={project.name} />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5 pt-5 border-t border-white/5 text-xs">
@@ -3141,6 +3422,7 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <span className="hidden sm:block"><StatusBadge status={t.priority} /></span>
                   <StatusBadge status={t.status} />
+                  <RowActions onEdit={() => onEditTask(t)} onArchive={() => onArchiveTask(t)} archiveLabel={t.title} />
                 </div>
               </div>
             ))}
@@ -3207,8 +3489,9 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p
 
 // ─── Staff Detail Page ────────────────────────────────────────────────────────
 
-const StaffDetailPage = ({ staffMember, projects, p4Ready, onBack }: {
+const StaffDetailPage = ({ staffMember, projects, p4Ready, onBack, onEdit, onArchive }: {
   staffMember: any; projects: any[]; p4Ready: boolean; onBack: () => void;
+  onEdit: (m: any) => void; onArchive: (m: any) => void;
 }) => {
   const [assignments, setAssignments] = useState<any[]>([]);
   const [staffLoad, setStaffLoad] = useState<{ active_assignments: number; total_allocation: number } | null>(null);
@@ -3240,14 +3523,17 @@ const StaffDetailPage = ({ staffMember, projects, p4Ready, onBack }: {
       </div>
 
       <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
-            {staffMember.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+              {staffMember.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{staffMember.name}</h1>
+              <div className="text-sm text-[#7070A0] mt-0.5">{staffMember.role_title ?? "—"} · {staffMember.team ?? "—"}</div>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h1 className="text-xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>{staffMember.name}</h1>
-            <div className="text-sm text-[#7070A0] mt-0.5">{staffMember.role_title ?? "—"} · {staffMember.team ?? "—"}</div>
-          </div>
+          <RowActions onEdit={() => onEdit(staffMember)} onArchive={() => onArchive(staffMember)} archiveLabel={staffMember.name} />
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5 pt-5 border-t border-white/5 text-xs">
           <div><div className="text-[#7070A0] font-mono mb-1">Contract</div><div className="text-white">{CONTRACT_LABELS[staffMember.contract_type] ?? staffMember.contract_type}</div></div>
@@ -3282,27 +3568,159 @@ const StaffDetailPage = ({ staffMember, projects, p4Ready, onBack }: {
   );
 };
 
-// ─── Client Detail Page ───────────────────────────────────────────────────────
+// ─── Knowledge Library ──────────────────────────────────────────────────────
 
-const NewContractModal = ({ clientId, onClose, onSaved }: { clientId: string; onClose: () => void; onSaved: () => void }) => {
-  const [f, setF] = useState({ title: "", pillar: "experiences", contract_type: "contract", value: "", start_date: "", end_date: "", status: "draft" });
+const NewLibraryItemModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) => {
+  const [itemType, setItemType] = useState<"link" | "file">("link");
+  const [f, setF] = useState({ title: "", description: "", url: "", category: "", pillar: "" });
+  const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
   const save = async (e: React.FormEvent) => {
-    e.preventDefault(); setSaving(true);
-    const { error } = await supabase.from("contracts").insert({
-      client_id: clientId, title: f.title, pillar: f.pillar as any,
-      contract_type: f.contract_type as any, value: f.value ? parseFloat(f.value) : null,
-      start_date: f.start_date || null, end_date: f.end_date || null, status: f.status as any,
+    e.preventDefault(); setSaving(true); setErr("");
+    let storagePath: string | null = null;
+    if (itemType === "file") {
+      if (!file) { setErr("Choose a file to upload."); setSaving(false); return; }
+      storagePath = `${Date.now()}-${file.name}`;
+      const { error: upErr } = await supabase.storage.from("library-files").upload(storagePath, file);
+      if (upErr) { setErr(upErr.message); setSaving(false); return; }
+    }
+    const { data: { user } } = await supabase.auth.getUser();
+    const { error } = await supabase.from("library_items").insert({
+      item_type: itemType, title: f.title,
+      description: f.description || null,
+      url: itemType === "link" ? f.url : null,
+      storage_path: storagePath,
+      category: f.category || null,
+      pillar: f.pillar || null,
+      created_by: user?.id ?? null,
     });
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
   };
 
   return (
-    <Modal title="New Contract" onClose={onClose}>
+    <Modal title="New Library Item" onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setItemType("link")} className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${itemType === "link" ? "bg-[#FF4D00] text-white" : "bg-white/5 text-[#7070A0] hover:text-white"}`}><Link2 size={14} className="inline mr-1.5 -mt-0.5" />Link</button>
+          <button type="button" onClick={() => setItemType("file")} className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${itemType === "file" ? "bg-[#FF4D00] text-white" : "bg-white/5 text-[#7070A0] hover:text-white"}`}><Upload size={14} className="inline mr-1.5 -mt-0.5" />File Upload</button>
+        </div>
+        <Field label="Title *"><input required className={inputCls} placeholder="Brand Guidelines 2026" value={f.title} onChange={e => set("title", e.target.value)} /></Field>
+        {itemType === "link" ? (
+          <Field label="URL *"><input required type="url" className={inputCls} placeholder="https://…" value={f.url} onChange={e => set("url", e.target.value)} /></Field>
+        ) : (
+          <Field label="File *"><input required type="file" className={inputCls} onChange={e => setFile(e.target.files?.[0] ?? null)} /></Field>
+        )}
+        <Field label="Description"><input className={inputCls} placeholder="What this is, when to use it…" value={f.description} onChange={e => set("description", e.target.value)} /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Category"><input className={inputCls} placeholder="SOP, Template, Deck…" value={f.category} onChange={e => set("category", e.target.value)} /></Field>
+          <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}><option value="">— None —</option>{Object.entries(PILLARS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
+        </div>
+        {err && <p className="text-sm text-red-400">{err}</p>}
+        <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : "Add to Library"}
+        </button>
+      </form>
+    </Modal>
+  );
+};
+
+const LibraryPage = ({ items, loading, onNew, onRefresh }: { items: any[]; loading: boolean; onNew: () => void; onRefresh: () => void }) => {
+  const [filterCat, setFilterCat] = useState("all");
+  const categories = Array.from(new Set(items.map((i: any) => i.category).filter(Boolean))) as string[];
+  const shown = filterCat === "all" ? items : items.filter((i: any) => i.category === filterCat);
+
+  const openItem = async (item: any) => {
+    if (item.item_type === "link") { window.open(item.url, "_blank", "noopener"); return; }
+    const { data, error } = await supabase.storage.from("library-files").createSignedUrl(item.storage_path, 3600);
+    if (!error && data) window.open(data.signedUrl, "_blank", "noopener");
+  };
+
+  const removeItem = async (item: any) => {
+    if (!window.confirm(`Delete "${item.title}"? This can't be undone.`)) return;
+    if (item.item_type === "file" && item.storage_path) await supabase.storage.from("library-files").remove([item.storage_path]);
+    await supabase.from("library_items").delete().eq("id", item.id);
+    onRefresh();
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Knowledge</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Library</h1></div>
+        <div className="flex gap-2">
+          <button onClick={() => exportCSV(items, "library")} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
+          <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
+          <button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Plus size={15} /> New Item</button>
+        </div>
+      </div>
+
+      {categories.length > 0 && (
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={() => setFilterCat("all")} className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${filterCat === "all" ? "bg-white/10 text-white" : "text-[#7070A0] hover:text-white hover:bg-white/5"}`}>All ({items.length})</button>
+          {categories.map((c: string) => (
+            <button key={c} onClick={() => setFilterCat(c)} className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${filterCat === c ? "bg-white/10 text-white" : "text-[#7070A0] hover:text-white hover:bg-white/5"}`}>{c}</button>
+          ))}
+        </div>
+      )}
+
+      {loading ? <div className="flex justify-center py-20"><Spinner /></div>
+        : shown.length === 0 ? <EmptyState icon={BookOpen} title="Library is empty" desc="Add links or upload files — SOPs, brand assets, playbooks — for the whole team to find." action={<button onClick={onNew} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> Add First Item</button>} />
+        : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {shown.map((item: any) => {
+              const Icon = item.item_type === "file" ? File : Link2;
+              return (
+                <div key={item.id} className="bg-[#10101C] border border-white/6 rounded-2xl p-5 hover:border-white/10 transition-colors">
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div className="w-9 h-9 rounded-lg bg-white/5 flex items-center justify-center flex-shrink-0"><Icon size={16} className="text-[#FF4D00]" /></div>
+                    <button onClick={() => removeItem(item)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Trash2 size={14} /></button>
+                  </div>
+                  <button onClick={() => openItem(item)} className="text-left w-full">
+                    <div className="font-semibold text-white text-sm hover:text-[#FF4D00] transition-colors truncate">{item.title}</div>
+                  </button>
+                  {item.description && <p className="text-xs text-[#7070A0] mt-1 truncate">{item.description}</p>}
+                  <div className="mt-3 flex items-center gap-2 flex-wrap">
+                    {item.category && <span className="text-xs font-mono px-2 py-0.5 rounded-md border border-white/8 text-[#B0ADCC]">{item.category}</span>}
+                    {item.pillar && <PillarBadge pillar={item.pillar} />}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      }
+    </div>
+  );
+};
+
+// ─── Client Detail Page ───────────────────────────────────────────────────────
+
+const NewContractModal = ({ clientId, record, onClose, onSaved }: { clientId: string; record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    title: record?.title ?? "", pillar: record?.pillar ?? "experiences", contract_type: record?.contract_type ?? "contract",
+    value: record?.value ? String(record.value) : "", start_date: record?.start_date ?? "", end_date: record?.end_date ?? "", status: record?.status ?? "draft",
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setSaving(true);
+    const payload = {
+      client_id: clientId, title: f.title, pillar: f.pillar as any,
+      contract_type: f.contract_type as any, value: f.value ? parseFloat(f.value) : null,
+      start_date: f.start_date || null, end_date: f.end_date || null, status: f.status as any,
+    };
+    const { error } = record ? await supabase.from("contracts").update(payload).eq("id", record.id) : await supabase.from("contracts").insert(payload);
+    setSaving(false);
+    if (error) setErr(error.message); else { onSaved(); onClose(); }
+  };
+
+  return (
+    <Modal title={record ? "Edit Contract" : "New Contract"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Contract Title *"><input required className={inputCls} placeholder="Sheedx Africa Summit — Full Production" value={f.title} onChange={e => set("title", e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
@@ -3317,16 +3735,17 @@ const NewContractModal = ({ clientId, onClose, onSaved }: { clientId: string; on
         </div>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : "Create Contract"}
+          {saving ? <Spinner /> : <Plus size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Contract"}
         </button>
       </form>
     </Modal>
   );
 };
 
-const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNewContract }: {
+const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNewContract, onEditClient, onArchiveClient, onEditContract, onArchiveContract }: {
   client: any; projects: any[]; contracts: any[];
   onBack: () => void; onRefresh: () => void; onNewContract: () => void;
+  onEditClient: (c: any) => void; onArchiveClient: (c: any) => void; onEditContract: (c: any) => void; onArchiveContract: (c: any) => void;
 }) => {
   const [tab, setTab] = useState<"projects" | "contracts">("projects");
   const [editStatus, setEditStatus] = useState(false);
@@ -3368,7 +3787,10 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
               )}
             </div>
           </div>
-          <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors flex-shrink-0"><RefreshCw size={15} /></button>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
+            <RowActions onEdit={() => onEditClient(client)} onArchive={() => onArchiveClient(client)} archiveLabel={client.name} />
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-5 pt-5 border-t border-white/5 text-xs">
@@ -3437,6 +3859,7 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <StatusBadge status={c.status} />
                     <PillarBadge pillar={c.pillar} />
+                    <RowActions onEdit={() => onEditContract(c)} onArchive={() => onArchiveContract(c)} archiveLabel={c.title} />
                   </div>
                 </div>
               ))}
@@ -3595,11 +4018,14 @@ export default function App() {
   const [vendors, setVendors] = useState<any[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
+  const [libraryItems, setLibraryItems] = useState<any[]>([]);
   const [role, setRole] = useState<Role>("founder");
   const [p2Ready, setP2Ready] = useState(false);
   const [p3Ready, setP3Ready] = useState(false);
   const [p3bReady, setP3bReady] = useState(false);
   const [p4Ready, setP4Ready] = useState(false);
+  const [p5Ready, setP5Ready] = useState(false);
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [selectedProject, setSelectedProject] = useState<any | null>(null);
   const [selectedClient, setSelectedClient] = useState<any | null>(null);
@@ -3608,6 +4034,7 @@ export default function App() {
   const [selectedStaff, setSelectedStaff] = useState<any | null>(null);
   const [liveEvent, setLiveEvent] = useState<any | null>(null);
   const [editingLead, setEditingLead] = useState<any | null>(null);
+  const [editingRecord, setEditingRecord] = useState<any | null>(null);
 
   // Auth listener
   useEffect(() => {
@@ -3640,8 +4067,8 @@ export default function App() {
       supabase.from("clients").select("*").is("archived_at", null).order("created_at", { ascending: false }),
       supabase.from("leads").select("*").is("archived_at", null).order("created_at", { ascending: false }),
       supabase.from("projects").select("*").is("archived_at", null).order("created_at", { ascending: false }),
-      supabase.from("tasks").select("*").order("due_date", { ascending: true }),
-      supabase.from("staff").select("*").eq("active", true).order("name"),
+      supabase.from("tasks").select("*").is("archived_at", null).order("due_date", { ascending: true }),
+      supabase.from("staff").select("*").is("archived_at", null).eq("active", true).order("name"),
       supabase.from("contracts").select("*").is("archived_at", null).order("created_at", { ascending: false }),
     ]);
     setClients(c.data ?? []);
@@ -3656,14 +4083,14 @@ export default function App() {
     const p2TablesMissing = !!revCheck.error;
     if (p2TablesMissing) { setP2Ready(false); }
     else {
-      const revFull = await supabase.from("revenue_entries").select("*").order("entry_month", { ascending: false });
+      const revFull = await supabase.from("revenue_entries").select("*").is("archived_at", null).order("entry_month", { ascending: false });
       setP2Ready(true);
       const [cost, inv, li, quot, targ] = await Promise.all([
-        supabase.from("cost_entries").select("*").order("entry_month", { ascending: false }),
+        supabase.from("cost_entries").select("*").is("archived_at", null).order("entry_month", { ascending: false }),
         supabase.from("invoices").select("*").is("archived_at", null).order("created_at", { ascending: false }),
         supabase.from("invoice_line_items").select("*"),
         supabase.from("quotations").select("*").is("archived_at", null).order("created_at", { ascending: false }),
-        supabase.from("targets").select("*").order("year").order("month"),
+        supabase.from("targets").select("*").is("archived_at", null).order("year").order("month"),
       ]);
       setRevenueEntries(revFull.data ?? []);
       setCostEntries(cost.data ?? []);
@@ -3703,7 +4130,7 @@ export default function App() {
       }
 
       const [pay, ven, po] = await Promise.all([
-        supabase.from("payroll_entries").select("*").order("period_month", { ascending: false }),
+        supabase.from("payroll_entries").select("*").is("archived_at", null).order("period_month", { ascending: false }),
         supabase.from("vendors").select("*").is("archived_at", null).order("name"),
         supabase.from("purchase_orders").select("*").is("archived_at", null).order("created_at", { ascending: false }),
       ]);
@@ -3712,22 +4139,53 @@ export default function App() {
       setPurchaseOrders(po.data ?? []);
     }
 
+    // Phase 5 tables (knowledge library)
+    const libCheck = await supabase.from("library_items").select("*").order("created_at", { ascending: false });
+    if (libCheck.error) { setP5Ready(false); }
+    else { setP5Ready(true); setLibraryItems(libCheck.data ?? []); }
+
     setLoadingData(false);
   }, [session, needsSetup]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Live Command Centre: subscribe to every table the Dashboard reads from and
+  // debounce-refetch on any change, so numbers update without a manual refresh.
+  // Reuses the existing fetchAll waterfall rather than merging individual
+  // realtime payloads into state, matching how every add/remove handler in this
+  // app already works (full refetch, not optimistic patching).
+  useEffect(() => {
+    if (!session || session === "loading" || needsSetup) return;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedRefetch = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => { fetchAll(); }, 400);
+    };
+    const liveTables = ["clients", "leads", "projects", "tasks", "revenue_entries", "cost_entries", "invoices"];
+    let channel = supabase.channel("bte-live");
+    liveTables.forEach(table => {
+      channel = channel.on("postgres_changes", { event: "*", schema: "public", table }, debouncedRefetch);
+    });
+    channel.subscribe((status) => setRealtimeConnected(status === "SUBSCRIBED"));
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      supabase.removeChannel(channel);
+      setRealtimeConnected(false);
+    };
+  }, [session, needsSetup, fetchAll]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") { e.preventDefault(); setQuickAdd(true); }
-      if (e.key === "Escape") { setQuickAdd(false); setModal(null); setMobileOpen(false); }
+      if (e.key === "Escape") { setQuickAdd(false); setModal(null); setEditingRecord(null); setMobileOpen(false); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, []);
 
   const handleQuickAction = (action: string) => {
+    setEditingRecord(null);
     if (action === "New Client") { setPage("clients"); setSelectedClient(null); setModal("client"); }
     else if (action === "New Project") { setPage("projects"); setSelectedProject(null); setModal("project"); }
     else if (action === "Add Lead") { setPage("leads"); setModal("lead"); }
@@ -3751,6 +4209,12 @@ export default function App() {
     await fetchAll();
   };
 
+  // Opens any New*Modal in edit mode by stashing the row being edited alongside
+  // the same modal key its "create" flow already uses.
+  const openEdit = (modalName: string, record: any) => { setEditingRecord(record); setModal(modalName); };
+  const closeModal = () => { setModal(null); setEditingRecord(null); };
+  const archiveAndRefresh = (table: string, record: any) => archiveRecord(table, record.id, fetchAll);
+
   // ── Render gates ──────────────────────────────────────────────────────────
 
   if (session === "loading") {
@@ -3772,20 +4236,24 @@ export default function App() {
   const renderPage = () => {
     if (!canAccess(role, page)) return <NoAccess />;
     switch (page) {
-      case "dashboard": return <Dashboard clients={clients} projects={projects} leads={leads} tasks={tasks} revenueEntries={revenueEntries} costEntries={costEntries} invoices={invoices} targets={targets} p2Ready={p2Ready} />;
+      case "dashboard": return <Dashboard clients={clients} projects={projects} leads={leads} tasks={tasks} revenueEntries={revenueEntries} costEntries={costEntries} invoices={invoices} targets={targets} p2Ready={p2Ready} realtimeConnected={realtimeConnected} />;
       case "clients":
         if (selectedClient) return (
           <ClientDetailPage
-            client={selectedClient}
+            client={clients.find((c: any) => c.id === selectedClient.id) ?? selectedClient}
             projects={projects}
             contracts={contracts}
             onBack={() => setSelectedClient(null)}
             onRefresh={() => { fetchAll(); }}
             onNewContract={() => setModal("contract")}
+            onEditClient={c => openEdit("client", c)}
+            onArchiveClient={c => { archiveAndRefresh("clients", c); setSelectedClient(null); }}
+            onEditContract={c => openEdit("contract", c)}
+            onArchiveContract={c => archiveAndRefresh("contracts", c)}
           />
         );
-        return <ClientsPage clients={clients} loading={loadingData} onNew={() => setModal("client")} onRefresh={fetchAll} onSelect={c => setSelectedClient(c)} />;
-      case "leads":     return <LeadsPage leads={leads} loading={loadingData} onNew={() => setModal("lead")} onRefresh={fetchAll} onEditLead={l => setEditingLead(l)} />;
+        return <ClientsPage clients={clients} loading={loadingData} onNew={() => setModal("client")} onRefresh={fetchAll} onSelect={c => setSelectedClient(c)} onEdit={c => openEdit("client", c)} onArchive={c => archiveAndRefresh("clients", c)} />;
+      case "leads":     return <LeadsPage leads={leads} loading={loadingData} onNew={() => setModal("lead")} onRefresh={fetchAll} onEditLead={l => setEditingLead(l)} onArchiveLead={l => archiveAndRefresh("leads", l)} />;
       case "projects":
         if (selectedProject) return (
           <ProjectDetailPage
@@ -3799,9 +4267,13 @@ export default function App() {
             onBack={() => setSelectedProject(null)}
             onRefresh={fetchAll}
             onAddTask={() => setModal("task-for-project")}
+            onEditProject={p => openEdit("project", p)}
+            onArchiveProject={p => { archiveAndRefresh("projects", p); setSelectedProject(null); }}
+            onEditTask={t => openEdit("task-edit", t)}
+            onArchiveTask={t => archiveAndRefresh("tasks", t)}
           />
         );
-        return <ProjectsPage projects={projects} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("project")} onRefresh={fetchAll} onSelect={p => setSelectedProject(p)} />;
+        return <ProjectsPage projects={projects} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("project")} onRefresh={fetchAll} onSelect={p => setSelectedProject(p)} onEdit={p => openEdit("project", p)} onArchive={p => archiveAndRefresh("projects", p)} />;
       case "staff":
         if (selectedStaff) return (
           <StaffDetailPage
@@ -3809,12 +4281,22 @@ export default function App() {
             projects={projects}
             p4Ready={p4Ready}
             onBack={() => setSelectedStaff(null)}
+            onEdit={m => openEdit("staff", m)}
+            onArchive={m => { archiveAndRefresh("staff", m); setSelectedStaff(null); }}
           />
         );
-        return <StaffPage staff={staff} loading={loadingData} onSelect={m => setSelectedStaff(m)} />;
-      case "payroll":   return <PayrollPage p4Ready={p4Ready} role={role} payroll={payroll} staff={staff} loading={loadingData} onNew={() => setModal("payroll")} onRefresh={fetchAll} />;
-      case "vendors":   return <VendorsPage p4Ready={p4Ready} role={role} vendors={vendors} purchaseOrders={purchaseOrders} projects={projects} loading={loadingData} onNew={(t) => setModal(t)} onRefresh={fetchAll} />;
-      case "settings":  return <SettingsPage role={role} profiles={profiles} currentUserId={session && session !== "loading" ? session.user.id : ""} p4Ready={p4Ready} onRefresh={fetchAll} />;
+        return <StaffPage staff={staff} loading={loadingData} onSelect={m => setSelectedStaff(m)} onNew={() => setModal("staff")} onEdit={m => openEdit("staff", m)} onArchive={m => archiveAndRefresh("staff", m)} />;
+      case "payroll":   return <PayrollPage p4Ready={p4Ready} role={role} payroll={payroll} staff={staff} loading={loadingData} onNew={() => setModal("payroll")} onRefresh={fetchAll} onEdit={e => openEdit("payroll", e)} onArchive={e => archiveAndRefresh("payroll_entries", e)} />;
+      case "vendors":   return <VendorsPage p4Ready={p4Ready} role={role} vendors={vendors} purchaseOrders={purchaseOrders} projects={projects} loading={loadingData} onNew={(t) => setModal(t)} onRefresh={fetchAll} onEditVendor={v => openEdit("vendor", v)} onArchiveVendor={v => archiveAndRefresh("vendors", v)} onEditPO={po => openEdit("po", po)} onArchivePO={po => archiveAndRefresh("purchase_orders", po)} />;
+      case "library":
+        if (!p5Ready) return (
+          <div className="space-y-5">
+            <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Knowledge</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Library</h1></div>
+            <P5SetupBanner />
+          </div>
+        );
+        return <LibraryPage items={libraryItems} loading={loadingData} onNew={() => setModal("library")} onRefresh={fetchAll} />;
+      case "settings":  return <SettingsPage role={role} profiles={profiles} currentUserId={session && session !== "loading" ? session.user.id : ""} p4Ready={p4Ready} p5Ready={p5Ready} onRefresh={fetchAll} />;
       case "events":
         if (selectedEvent) return (
           <EventDetailPage
@@ -3826,9 +4308,11 @@ export default function App() {
             onBack={() => setSelectedEvent(null)}
             onRefresh={fetchAll}
             onGoLive={() => setLiveEvent(events.find((e: any) => e.id === selectedEvent.id) ?? selectedEvent)}
+            onEdit={e => openEdit("event", e)}
+            onArchive={e => { archiveAndRefresh("events", e); setSelectedEvent(null); }}
           />
         );
-        return <EventsPage p3Ready={p3Ready} events={events} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("event")} onRefresh={fetchAll} onSelect={e => setSelectedEvent(e)} />;
+        return <EventsPage p3Ready={p3Ready} events={events} clients={clients} staff={staff} loading={loadingData} onNew={() => setModal("event")} onRefresh={fetchAll} onSelect={e => setSelectedEvent(e)} onEdit={e => openEdit("event", e)} onArchive={e => archiveAndRefresh("events", e)} />;
       case "finance":
         if (selectedInvoice) return (
           <InvoiceDetailPage
@@ -3855,6 +4339,14 @@ export default function App() {
             onRefresh={fetchAll}
             onSelectInvoice={(inv) => setSelectedInvoice(inv)}
             onConvertQuotation={convertQuotationToInvoice}
+            onEditRevenue={e => openEdit("revenue", e)}
+            onArchiveRevenue={e => archiveAndRefresh("revenue_entries", e)}
+            onEditCost={e => openEdit("cost", e)}
+            onArchiveCost={e => archiveAndRefresh("cost_entries", e)}
+            onEditInvoice={inv => openEdit("invoice", inv)}
+            onArchiveInvoice={inv => archiveAndRefresh("invoices", inv)}
+            onEditQuotation={q => openEdit("quotation", q)}
+            onArchiveQuotation={q => archiveAndRefresh("quotations", q)}
           />
         );
       case "targets":
@@ -3866,6 +4358,8 @@ export default function App() {
             onNew={() => setModal("target")}
             onRefresh={fetchAll}
             loading={loadingData}
+            onEdit={t => openEdit("target", t)}
+            onArchive={t => archiveAndRefresh("targets", t)}
           />
         );
       default: return (
@@ -3922,25 +4416,30 @@ export default function App() {
 
       {/* Modals */}
       {quickAdd && <QuickAddModal onClose={() => setQuickAdd(false)} onAction={handleQuickAction} />}
-      {modal === "client"   && <NewClientModal  onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "lead"     && <NewLeadModal    onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "project"  && <NewProjectModal onClose={() => setModal(null)} onSaved={fetchAll} clients={clients} staff={staff} />}
-      {modal === "task"     && <NewTaskModal    onClose={() => setModal(null)} onSaved={fetchAll} projects={projects} staff={staff} />}
+      {modal === "client"   && <NewClientModal  record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "lead"     && <NewLeadModal    onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "project"  && <NewProjectModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} clients={clients} staff={staff} />}
+      {modal === "task"     && <NewTaskModal    onClose={closeModal} onSaved={fetchAll} projects={projects} staff={staff} />}
       {modal === "task-for-project" && selectedProject && (
-        <NewTaskModal onClose={() => setModal(null)} onSaved={() => { setModal(null); fetchAll(); }} projects={[selectedProject]} staff={staff} />
+        <NewTaskModal onClose={closeModal} onSaved={() => { closeModal(); fetchAll(); }} projects={[selectedProject]} staff={staff} />
+      )}
+      {modal === "task-edit" && editingRecord && (
+        <NewTaskModal record={editingRecord} onClose={closeModal} onSaved={() => { closeModal(); fetchAll(); }} projects={projects} staff={staff} />
       )}
       {modal === "contract" && selectedClient && (
-        <NewContractModal clientId={selectedClient.id} onClose={() => setModal(null)} onSaved={fetchAll} />
+        <NewContractModal clientId={selectedClient.id} record={editingRecord} onClose={closeModal} onSaved={fetchAll} />
       )}
-      {modal === "revenue"  && <NewRevenueModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "cost"     && <NewCostModal projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "invoice"  && <NewInvoiceModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "quotation" && <NewQuotationModal clients={clients} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "target"   && <NewTargetModal onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "event"    && <NewEventModal clients={clients} projects={projects} staff={staff} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "payroll"  && <NewPayrollModal staff={staff} onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "vendor"   && <NewVendorModal onClose={() => setModal(null)} onSaved={fetchAll} />}
-      {modal === "po"       && <NewPOModal vendors={vendors} projects={projects} onClose={() => setModal(null)} onSaved={fetchAll} />}
+      {modal === "staff"    && <NewStaffModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "revenue"  && <NewRevenueModal record={editingRecord} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "cost"     && <NewCostModal record={editingRecord} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "invoice"  && <NewInvoiceModal record={editingRecord} recordLines={editingRecord ? lineItems.filter((l: any) => l.invoice_id === editingRecord.id) : undefined} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "quotation" && <NewQuotationModal record={editingRecord} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "target"   && <NewTargetModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "event"    && <NewEventModal record={editingRecord} clients={clients} projects={projects} staff={staff} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "payroll"  && <NewPayrollModal record={editingRecord} staff={staff} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "vendor"   && <NewVendorModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "po"       && <NewPOModal record={editingRecord} vendors={vendors} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "library"  && <NewLibraryItemModal onClose={closeModal} onSaved={fetchAll} />}
       {editingLead && <EditLeadModal lead={editingLead} onClose={() => setEditingLead(null)} onSaved={() => { setEditingLead(null); fetchAll(); }} />}
     </div>
   );

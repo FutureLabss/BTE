@@ -8,7 +8,7 @@ import {
   MapPin, Users, Trash2, CalendarClock, PartyPopper, Download, Pencil, Archive,
   Upload, Link2, File, Wifi, WifiOff,
 } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, PieChart, Pie, Cell, Legend } from "recharts";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../../utils/supabase/client";
 
@@ -20,6 +20,24 @@ const formatNaira = (n: number) => {
   if (n >= 1_000_000) return `₦${(n / 1_000_000).toFixed(1)}M`;
   return `₦${n.toLocaleString("en-NG")}`;
 };
+
+// Multi-currency support: every money-bearing record carries its own `currency`
+// (default 'NGN') plus an `fx_rate_to_ngn` the founder types in by hand for
+// non-NGN entries (no live FX feed is available on this platform — see Known
+// Constraints in PLAN.md). `formatMoney` renders in the record's own currency;
+// `toNgnEquivalent` is what aggregates (dashboard totals, P&L, targets) sum so a
+// mix of currencies still rolls up into one blended NGN number.
+const CURRENCY_SYMBOLS: Record<string, string> = { NGN: "₦", USD: "$", GBP: "£", EUR: "€" };
+
+const formatMoney = (n: number, currency: string = "NGN") => {
+  const symbol = CURRENCY_SYMBOLS[currency] ?? currency + " ";
+  if (!n) return `${symbol}0`;
+  if (n >= 1_000_000_000) return `${symbol}${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${symbol}${(n / 1_000_000).toFixed(1)}M`;
+  return `${symbol}${n.toLocaleString("en-US")}`;
+};
+
+const toNgnEquivalent = (amount: number, fxRateToNgn: number = 1) => (amount ?? 0) * (fxRateToNgn ?? 1);
 
 const formatDate = (d: string | null) => {
   if (!d) return "—";
@@ -178,6 +196,17 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
   <div className="space-y-1.5">
     <label className="text-xs font-mono text-[#7070A0] uppercase tracking-wider">{label}</label>
     {children}
+  </div>
+);
+
+// Shared currency + FX-rate pair for any money-bearing form. The rate field only
+// appears for non-NGN currencies — NGN entries need no manual FX step at all.
+const CurrencyFXFields = ({ currency, fxRate, onCurrency, onFxRate }: { currency: string; fxRate: string; onCurrency: (v: string) => void; onFxRate: (v: string) => void }) => (
+  <div className="grid grid-cols-2 gap-3">
+    <Field label="Currency"><select className={selectCls} value={currency} onChange={e => onCurrency(e.target.value)}>{Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
+    {currency !== "NGN" && (
+      <Field label="FX Rate to ₦ *"><input required type="number" min="0" step="0.0001" className={inputCls} placeholder="1650" value={fxRate} onChange={e => onFxRate(e.target.value)} /></Field>
+    )}
   </div>
 );
 
@@ -621,6 +650,7 @@ const NewProjectModal = ({ record, onClose, onSaved, clients, staff }: { record?
     name: record?.name ?? "", client_id: record?.client_id ?? "", pillar: record?.pillar ?? "experiences",
     project_lead_id: record?.project_lead_id ?? "", deadline: record?.deadline ?? "", budget: record?.budget ? String(record.budget) : "",
     status: record?.status ?? "not_started", is_event: record ? String(!!record.is_event) : "false",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -628,7 +658,7 @@ const NewProjectModal = ({ record, onClose, onSaved, clients, staff }: { record?
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
-    const payload = { name: f.name, client_id: f.client_id || null, pillar: f.pillar as any, project_lead_id: f.project_lead_id || null, deadline: f.deadline || null, budget: f.budget ? parseFloat(f.budget) : null, status: f.status as any, is_event: f.is_event === "true" };
+    const payload = { name: f.name, client_id: f.client_id || null, pillar: f.pillar as any, project_lead_id: f.project_lead_id || null, deadline: f.deadline || null, budget: f.budget ? parseFloat(f.budget) : null, status: f.status as any, is_event: f.is_event === "true", currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn) };
     const { error } = record ? await supabase.from("projects").update(payload).eq("id", record.id) : await supabase.from("projects").insert(payload);
     setSaving(false);
     if (error) setErr(error.message); else { onSaved(); onClose(); }
@@ -646,8 +676,9 @@ const NewProjectModal = ({ record, onClose, onSaved, clients, staff }: { record?
         <Field label="Project Lead"><select className={selectCls} value={f.project_lead_id} onChange={e => set("project_lead_id", e.target.value)}><option value="">Unassigned</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Deadline"><input type="date" className={inputCls} value={f.deadline} onChange={e => set("deadline", e.target.value)} /></Field>
-          <Field label="Budget (₦)"><input type="number" className={inputCls} placeholder="12000000" value={f.budget} onChange={e => set("budget", e.target.value)} /></Field>
+          <Field label={`Budget (${CURRENCY_SYMBOLS[f.currency] ?? f.currency})`}><input type="number" className={inputCls} placeholder="12000000" value={f.budget} onChange={e => set("budget", e.target.value)} /></Field>
         </div>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
         <Field label="Is this an Event?"><select className={selectCls} value={f.is_event} onChange={e => set("is_event", e.target.value)}><option value="false">No</option><option value="true">Yes</option></select></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
@@ -857,7 +888,7 @@ const QuickAddModal = ({ onClose, onAction }: { onClose: () => void; onAction: (
         { label: "Add Task",      icon: CheckCircle2, color: "text-amber-400" },
         { label: "New Event",     icon: Calendar,     color: "text-pink-400" },
         { label: "Log Revenue",   icon: ArrowUpRight, color: "text-emerald-400" },
-        { label: "Log Cost",      icon: ArrowDownRight, color: "text-red-400" },
+        { label: "Log Expenditure", icon: ArrowDownRight, color: "text-red-400" },
       ].map(a => (
         <button key={a.label} onClick={() => { onAction(a.label); onClose(); }}
           className="flex items-center gap-3 p-4 rounded-xl border border-white/6 bg-white/2 hover:bg-white/5 hover:border-white/12 text-left transition-all">
@@ -877,6 +908,7 @@ const NewRevenueModal = ({ clients, projects, record, onClose, onSaved }: { clie
     description: record?.description ?? "", amount: record?.amount != null ? String(record.amount) : "", pillar: record?.pillar ?? "experiences",
     client_id: record?.client_id ?? "", project_id: record?.project_id ?? "", revenue_type: record?.revenue_type ?? "project_fee",
     entry_month: (record?.entry_month ?? today).slice(0, 7), payment_status: record?.payment_status ?? "invoiced",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -889,6 +921,7 @@ const NewRevenueModal = ({ clients, projects, record, onClose, onSaved }: { clie
       client_id: f.client_id || null, project_id: f.project_id || null,
       revenue_type: f.revenue_type as any, entry_month: f.entry_month + "-01",
       payment_status: f.payment_status as any,
+      currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn),
     };
     const { error } = record ? await supabase.from("revenue_entries").update(payload).eq("id", record.id) : await supabase.from("revenue_entries").insert(payload);
     setSaving(false);
@@ -899,13 +932,14 @@ const NewRevenueModal = ({ clients, projects, record, onClose, onSaved }: { clie
     <Modal title={record ? "Edit Revenue Entry" : "Log Revenue"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Description *"><input required className={inputCls} placeholder="Sheedx Africa Summit — Production fee" value={f.description} onChange={e => set("description", e.target.value)} /></Field>
-        <Field label="Amount (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="12500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
+        <Field label={`Amount (${CURRENCY_SYMBOLS[f.currency] ?? f.currency}) *`}><input required type="number" min="0" step="0.01" className={inputCls} placeholder="12500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
         <div className="grid grid-cols-2 gap-3">
           <Field label="Month"><input type="month" className={inputCls} value={f.entry_month} onChange={e => set("entry_month", e.target.value)} /></Field>
           <Field label="Status"><select className={selectCls} value={f.payment_status} onChange={e => set("payment_status", e.target.value)}><option value="invoiced">Invoiced</option><option value="received">Received</option><option value="overdue">Overdue</option></select></Field>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Type"><select className={selectCls} value={f.revenue_type} onChange={e => set("revenue_type", e.target.value)}><option value="project_fee">Project Fee</option><option value="retainer">Retainer</option><option value="consultancy">Consultancy</option><option value="other">Other</option></select></Field>
+          <Field label="Type"><select className={selectCls} value={f.revenue_type} onChange={e => set("revenue_type", e.target.value)}><option value="project_fee">Project Fee</option><option value="retainer">Retainer</option><option value="consultancy">Consultancy</option><option value="donation">Donation</option><option value="grant">Grant</option><option value="other">Other</option></select></Field>
           <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}>{Object.entries(PILLARS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
         </div>
         <Field label="Client"><select className={selectCls} value={f.client_id} onChange={e => set("client_id", e.target.value)}><option value="">— None —</option>{clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
@@ -919,11 +953,13 @@ const NewRevenueModal = ({ clients, projects, record, onClose, onSaved }: { clie
   );
 };
 
-const NewCostModal = ({ projects, record, onClose, onSaved }: { projects: any[]; record?: any; onClose: () => void; onSaved: () => void }) => {
+const NewCostModal = ({ projects, clients, events, record, defaultProjectId, defaultEventId, onClose, onSaved }: { projects: any[]; clients: any[]; events: any[]; record?: any; defaultProjectId?: string; defaultEventId?: string; onClose: () => void; onSaved: () => void }) => {
   const today = new Date().toISOString().slice(0, 7);
   const [f, setF] = useState({
     description: record?.description ?? "", amount: record?.amount != null ? String(record.amount) : "", pillar: record?.pillar ?? "experiences",
-    project_id: record?.project_id ?? "", category: record?.category ?? "project_cost", entry_month: (record?.entry_month ?? today).slice(0, 7), paid: record ? String(!!record.paid) : "false",
+    project_id: record?.project_id ?? defaultProjectId ?? "", client_id: record?.client_id ?? "", event_id: record?.event_id ?? defaultEventId ?? "",
+    category: record?.category ?? "project_cost", entry_month: (record?.entry_month ?? today).slice(0, 7), paid: record ? String(!!record.paid) : "false",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -933,8 +969,9 @@ const NewCostModal = ({ projects, record, onClose, onSaved }: { projects: any[];
     e.preventDefault(); setSaving(true);
     const payload = {
       description: f.description, amount: parseFloat(f.amount), pillar: f.pillar as any,
-      project_id: f.project_id || null, category: f.category as any,
+      project_id: f.project_id || null, client_id: f.client_id || null, event_id: f.event_id || null, category: f.category as any,
       entry_month: f.entry_month + "-01", paid: f.paid === "true",
+      currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn),
     };
     const { error } = record ? await supabase.from("cost_entries").update(payload).eq("id", record.id) : await supabase.from("cost_entries").insert(payload);
     setSaving(false);
@@ -942,10 +979,11 @@ const NewCostModal = ({ projects, record, onClose, onSaved }: { projects: any[];
   };
 
   return (
-    <Modal title={record ? "Edit Cost Entry" : "Log Cost"} onClose={onClose}>
+    <Modal title={record ? "Edit Expenditure Entry" : "Log Expenditure"} onClose={onClose}>
       <form onSubmit={save} className="space-y-4">
         <Field label="Description *"><input required className={inputCls} placeholder="Venue deposit — NICON Luxury Hotel" value={f.description} onChange={e => set("description", e.target.value)} /></Field>
-        <Field label="Amount (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="3500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
+        <Field label={`Amount (${CURRENCY_SYMBOLS[f.currency] ?? f.currency}) *`}><input required type="number" min="0" step="0.01" className={inputCls} placeholder="3500000" value={f.amount} onChange={e => set("amount", e.target.value)} /></Field>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
         <div className="grid grid-cols-2 gap-3">
           <Field label="Month"><input type="month" className={inputCls} value={f.entry_month} onChange={e => set("entry_month", e.target.value)} /></Field>
           <Field label="Paid?"><select className={selectCls} value={f.paid} onChange={e => set("paid", e.target.value)}><option value="false">Unpaid</option><option value="true">Paid</option></select></Field>
@@ -955,9 +993,73 @@ const NewCostModal = ({ projects, record, onClose, onSaved }: { projects: any[];
           <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}>{Object.entries(PILLARS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
         </div>
         <Field label="Project (optional)"><select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">— None / Overhead —</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Client (optional)"><select className={selectCls} value={f.client_id} onChange={e => set("client_id", e.target.value)}><option value="">— None —</option>{clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
+          <Field label="Event (optional)"><select className={selectCls} value={f.event_id} onChange={e => set("event_id", e.target.value)}><option value="">— None —</option>{events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}</select></Field>
+        </div>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
-          {saving ? <Spinner /> : <ArrowDownRight size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Log Cost"}
+          {saving ? <Spinner /> : <ArrowDownRight size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Log Expenditure"}
+        </button>
+      </form>
+    </Modal>
+  );
+};
+
+const NewBudgetAllocationModal = ({ record, onClose, onSaved }: { record?: any; onClose: () => void; onSaved: () => void }) => {
+  const [f, setF] = useState({
+    year: String(record?.year ?? new Date().getFullYear()), month: record?.month != null ? String(record.month) : "",
+    pillar: record?.pillar ?? "", category: record?.category ?? "", allocated_amount: record?.allocated_amount != null ? String(record.allocated_amount) : "",
+    notes: record?.notes ?? "", currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setSaving(true);
+    const payload = {
+      year: parseInt(f.year), month: f.month ? parseInt(f.month) : null,
+      pillar: f.pillar as any || null, category: f.category as any || null,
+      allocated_amount: parseFloat(f.allocated_amount), notes: f.notes || null,
+      currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn),
+    };
+    const { error } = record ? await supabase.from("budget_allocations").update(payload).eq("id", record.id) : await supabase.from("budget_allocations").insert(payload);
+    setSaving(false);
+    if (error) setErr(error.message); else { onSaved(); onClose(); }
+  };
+
+  return (
+    <Modal title={record ? "Edit Budget Allocation" : "New Budget Allocation"} onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Year *"><input required type="number" className={inputCls} value={f.year} onChange={e => set("year", e.target.value)} /></Field>
+          <Field label="Month (blank = annual)">
+            <select className={selectCls} value={f.month} onChange={e => set("month", e.target.value)}>
+              <option value="">Annual</option>
+              {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].map((m, i) => <option key={i+1} value={String(i+1)}>{m}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Pillar (blank = company-wide)">
+            <select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}>
+              <option value="">Company-wide</option>{Object.entries(PILLARS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="Category (blank = all)">
+            <select className={selectCls} value={f.category} onChange={e => set("category", e.target.value)}>
+              <option value="">All categories</option>
+              <option value="project_cost">Project Cost</option><option value="overhead">Overhead</option><option value="vendor">Vendor</option><option value="software">Software</option><option value="other">Other</option>
+            </select>
+          </Field>
+        </div>
+        <Field label={`Allocated Amount (${CURRENCY_SYMBOLS[f.currency] ?? f.currency}) *`}><input required type="number" min="0" step="0.01" className={inputCls} placeholder="10000000" value={f.allocated_amount} onChange={e => set("allocated_amount", e.target.value)} /></Field>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
+        <Field label="Notes"><input className={inputCls} placeholder="What this allocation covers…" value={f.notes} onChange={e => set("notes", e.target.value)} /></Field>
+        {err && <p className="text-sm text-red-400">{err}</p>}
+        <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
+          {saving ? <Spinner /> : <Wallet size={15} />}{saving ? "Saving…" : record ? "Save Changes" : "Create Allocation"}
         </button>
       </form>
     </Modal>
@@ -969,6 +1071,7 @@ const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSa
   const [head, setHead] = useState({
     client_id: record?.client_id ?? "", project_id: record?.project_id ?? "", due_date: record?.due_date ?? "",
     notes: record?.notes ?? "", status: record?.status ?? "draft",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [lines, setLines] = useState(
     recordLines && recordLines.length ? recordLines.map(l => ({ description: l.description, qty: String(l.qty), unit_price: String(l.unit_price) })) : [{ description: "", qty: "1", unit_price: "" }]
@@ -987,6 +1090,7 @@ const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSa
       client_id: head.client_id, project_id: head.project_id || null,
       due_date: head.due_date, notes: head.notes || null,
       status: head.status as any, subtotal, total: subtotal,
+      currency: head.currency as any, fx_rate_to_ngn: head.currency === "NGN" ? 1 : parseFloat(head.fx_rate_to_ngn),
     };
     const invId = record
       ? (await supabase.from("invoices").update(headPayload).eq("id", record.id).select().single()).data?.id
@@ -1020,6 +1124,7 @@ const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSa
             <Field label="Due Date *"><input required type="date" className={inputCls} value={head.due_date} onChange={e => setH("due_date", e.target.value)} /></Field>
             <Field label="Status"><select className={selectCls} value={head.status} onChange={e => setH("status", e.target.value)}><option value="draft">Draft</option><option value="sent">Sent</option></select></Field>
           </div>
+          <CurrencyFXFields currency={head.currency} fxRate={head.fx_rate_to_ngn} onCurrency={v => setH("currency", v)} onFxRate={v => setH("fx_rate_to_ngn", v)} />
           <Field label="Notes"><input className={inputCls} placeholder="Payment terms, references…" value={head.notes} onChange={e => setH("notes", e.target.value)} /></Field>
           <button disabled={!head.client_id || !head.due_date} onClick={() => setStep(2)}
             className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-40 transition-colors">
@@ -1035,9 +1140,9 @@ const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSa
                   <input className={inputCls} placeholder="Description" value={l.description} onChange={e => setLine(i, "description", e.target.value)} />
                   <div className="flex gap-2">
                     <input type="number" min="0.01" step="0.01" className={`${inputCls} w-20`} placeholder="Qty" value={l.qty} onChange={e => setLine(i, "qty", e.target.value)} />
-                    <input type="number" min="0" step="0.01" className={`${inputCls} flex-1`} placeholder="Unit price (₦)" value={l.unit_price} onChange={e => setLine(i, "unit_price", e.target.value)} />
+                    <input type="number" min="0" step="0.01" className={`${inputCls} flex-1`} placeholder={`Unit price (${CURRENCY_SYMBOLS[head.currency] ?? head.currency})`} value={l.unit_price} onChange={e => setLine(i, "unit_price", e.target.value)} />
                     <div className="flex items-center text-xs font-mono text-[#7070A0] whitespace-nowrap pt-3">
-                      {formatNaira(parseFloat(l.qty || "0") * parseFloat(l.unit_price || "0"))}
+                      {formatMoney(parseFloat(l.qty || "0") * parseFloat(l.unit_price || "0"), head.currency)}
                     </div>
                   </div>
                 </div>
@@ -1048,7 +1153,7 @@ const NewInvoiceModal = ({ clients, projects, record, recordLines, onClose, onSa
           <button type="button" onClick={addLine} className="flex items-center gap-2 text-xs text-[#7070A0] hover:text-white transition-colors"><Plus size={13} /> Add line item</button>
           <div className="flex items-center justify-between pt-3 border-t border-white/6">
             <span className="text-sm text-[#7070A0]">Total</span>
-            <span className="text-lg font-bold font-mono text-white">{formatNaira(subtotal)}</span>
+            <span className="text-lg font-bold font-mono text-white">{formatMoney(subtotal, head.currency)}</span>
           </div>
           {err && <p className="text-sm text-red-400">{err}</p>}
           <div className="flex gap-3">
@@ -1119,6 +1224,7 @@ const NewQuotationModal = ({ clients, projects, record, onClose, onSaved }: { cl
   const [f, setF] = useState({
     title: record?.title ?? "", client_id: record?.client_id ?? "", project_id: record?.project_id ?? "",
     total: record?.total != null ? String(record.total) : "", notes: record?.notes ?? "", status: record?.status ?? "draft",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -1130,6 +1236,7 @@ const NewQuotationModal = ({ clients, projects, record, onClose, onSaved }: { cl
     const payload = {
       title: f.title, client_id: f.client_id, project_id: f.project_id || null,
       subtotal: total, total, notes: f.notes || null, status: f.status as any,
+      currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn),
     };
     const { error } = record ? await supabase.from("quotations").update(payload).eq("id", record.id) : await supabase.from("quotations").insert(payload);
     setSaving(false);
@@ -1151,9 +1258,10 @@ const NewQuotationModal = ({ clients, projects, record, onClose, onSaved }: { cl
           </select>
         </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Total (₦) *"><input required type="number" min="0" step="0.01" className={inputCls} placeholder="8500000" value={f.total} onChange={e => set("total", e.target.value)} /></Field>
+          <Field label={`Total (${CURRENCY_SYMBOLS[f.currency] ?? f.currency}) *`}><input required type="number" min="0" step="0.01" className={inputCls} placeholder="8500000" value={f.total} onChange={e => set("total", e.target.value)} /></Field>
           <Field label="Status"><select className={selectCls} value={f.status} onChange={e => set("status", e.target.value)}><option value="draft">Draft</option><option value="sent">Sent</option></select></Field>
         </div>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
         <Field label="Notes"><input className={inputCls} placeholder="Scope summary, terms…" value={f.notes} onChange={e => set("notes", e.target.value)} /></Field>
         {err && <p className="text-sm text-red-400">{err}</p>}
         <button type="submit" disabled={saving} className="w-full py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
@@ -1167,12 +1275,13 @@ const NewQuotationModal = ({ clients, projects, record, onClose, onSaved }: { cl
 // ─── Invoice Print ────────────────────────────────────────────────────────────
 
 const printInvoice = (invoice: any, lineItems: any[], clientName: string, projectName?: string) => {
+  const currencySymbol = CURRENCY_SYMBOLS[invoice.currency] ?? invoice.currency ?? "₦";
   const linesHTML = lineItems.map(l => `
     <tr>
       <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;font-size:13px;">${l.description}</td>
       <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:13px;">${l.qty}</td>
-      <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:13px;">₦${Number(l.unit_price).toLocaleString("en-NG")}</td>
-      <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:13px;font-weight:600;">₦${Number(l.line_total).toLocaleString("en-NG")}</td>
+      <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:13px;">${currencySymbol}${Number(l.unit_price).toLocaleString("en-US")}</td>
+      <td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:13px;font-weight:600;">${currencySymbol}${Number(l.line_total).toLocaleString("en-US")}</td>
     </tr>`).join("");
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${invoice.invoice_number}</title>
   <style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:'Helvetica Neue',Arial,sans-serif;color:#111;background:#fff;padding:40px;max-width:800px;margin:0 auto;}
@@ -1208,7 +1317,7 @@ const printInvoice = (invoice: any, lineItems: any[], clientName: string, projec
   <table>
     <thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Total</th></tr></thead>
     <tbody>${linesHTML}</tbody>
-    <tfoot><tr class="total-row"><td colspan="3">Total</td><td>₦${Number(invoice.total).toLocaleString("en-NG")}</td></tr></tfoot>
+    <tfoot><tr class="total-row"><td colspan="3">Total</td><td>${currencySymbol}${Number(invoice.total).toLocaleString("en-US")}</td></tr></tfoot>
   </table>
   ${invoice.notes ? `<div style="margin-bottom:24px;padding:16px;background:#f8f8f8;border-radius:8px;font-size:13px;color:#555;">${invoice.notes}</div>` : ""}
   <div class="footer">Break The Eyes Media &nbsp;·&nbsp; Thank you for your business</div>
@@ -1305,21 +1414,35 @@ const InvoiceDetailPage = ({ invoice, lineItems, clients, projects, onBack, onRe
 
 // ─── Finance Page ─────────────────────────────────────────────────────────────
 
-const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems, quotations, clients, projects, loading, onNew, onRefresh, onSelectInvoice, onConvertQuotation, onEditRevenue, onArchiveRevenue, onEditCost, onArchiveCost, onEditInvoice, onArchiveInvoice, onEditQuotation, onArchiveQuotation }: {
-  p2Ready: boolean; revenueEntries: any[]; costEntries: any[]; invoices: any[]; lineItems: any[]; quotations: any[]; clients: any[]; projects: any[];
+const PILLAR_CHART_COLORS: Record<string, string> = {
+  experiences: "#FF4D00", production: "#7070A0", communications: "#3B82F6", brand_marketing: "#F59E0B", people_culture: "#10B981",
+};
+
+const FinancePage = ({ p2Ready, p6Ready, revenueEntries, costEntries, invoices, lineItems, quotations, budgetAllocations, budgetVsActual, clients, projects, loading, onNew, onRefresh, onSelectInvoice, onConvertQuotation, onEditRevenue, onArchiveRevenue, onEditCost, onArchiveCost, onEditInvoice, onArchiveInvoice, onEditQuotation, onArchiveQuotation, onEditBudget, onArchiveBudget }: {
+  p2Ready: boolean; p6Ready: boolean; revenueEntries: any[]; costEntries: any[]; invoices: any[]; lineItems: any[]; quotations: any[];
+  budgetAllocations: any[]; budgetVsActual: any[]; clients: any[]; projects: any[];
   loading: boolean; onNew: (t: string) => void; onRefresh: () => void; onSelectInvoice: (inv: any) => void; onConvertQuotation: (q: any) => void;
   onEditRevenue: (e: any) => void; onArchiveRevenue: (e: any) => void; onEditCost: (e: any) => void; onArchiveCost: (e: any) => void;
   onEditInvoice: (inv: any) => void; onArchiveInvoice: (inv: any) => void; onEditQuotation: (q: any) => void; onArchiveQuotation: (q: any) => void;
+  onEditBudget: (b: any) => void; onArchiveBudget: (b: any) => void;
 }) => {
-  const [tab, setTab] = useState<"revenue"|"costs"|"invoices"|"quotations">("revenue");
+  const [tab, setTab] = useState<"revenue"|"costs"|"invoices"|"quotations"|"budget">("revenue");
   const [converting, setConverting] = useState<string | null>(null);
   const clientMap = Object.fromEntries(clients.map((c: any) => [c.id, c.name]));
   const projectMap = Object.fromEntries(projects.map((p: any) => [p.id, p.name]));
 
-  const totalRev = revenueEntries.reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const totalCost = costEntries.reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const totalReceived = revenueEntries.filter((e: any) => e.payment_status === "received").reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const outstanding = invoices.filter((i: any) => i.status === "sent" || i.status === "overdue").reduce((s: number, i: any) => s + Number(i.total), 0);
+  const totalRev = revenueEntries.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+  const totalCost = costEntries.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+  const totalReceived = revenueEntries.filter((e: any) => e.payment_status === "received").reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+  const outstanding = invoices.filter((i: any) => i.status === "sent" || i.status === "overdue").reduce((s: number, i: any) => s + toNgnEquivalent(Number(i.total), i.fx_rate_to_ngn), 0);
+
+  // Spending breakdown by pillar (NGN-equivalent), for the pie chart on the Expenditure tab
+  const spendByPillar = Object.entries(
+    costEntries.reduce((acc: Record<string, number>, e: any) => {
+      acc[e.pillar] = (acc[e.pillar] ?? 0) + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn);
+      return acc;
+    }, {})
+  ).map(([pillar, value]) => ({ name: PILLARS[pillar] ?? pillar, pillar, value: value as number }));
 
   if (!p2Ready) return (
     <div className="space-y-5">
@@ -1335,30 +1458,30 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
         <div className="flex gap-2">
           <button
             onClick={() => exportCSV(
-              tab === "invoices" ? invoices : tab === "costs" ? costEntries : tab === "quotations" ? quotations : revenueEntries,
-              tab
+              tab === "invoices" ? invoices : tab === "costs" ? costEntries : tab === "quotations" ? quotations : tab === "budget" ? budgetVsActual : revenueEntries,
+              tab === "costs" ? "expenditure" : tab
             )}
             title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
           <button onClick={onRefresh} className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><RefreshCw size={15} /></button>
-          <button onClick={() => onNew(tab === "invoices" ? "invoice" : tab === "costs" ? "cost" : tab === "quotations" ? "quotation" : "revenue")}
+          <button onClick={() => onNew(tab === "invoices" ? "invoice" : tab === "costs" ? "cost" : tab === "quotations" ? "quotation" : tab === "budget" ? "budget" : "revenue")}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors">
-            <Plus size={15} />{tab === "invoices" ? "New Invoice" : tab === "costs" ? "Log Cost" : tab === "quotations" ? "New Quotation" : "Log Revenue"}
+            <Plus size={15} />{tab === "invoices" ? "New Invoice" : tab === "costs" ? "Log Expenditure" : tab === "quotations" ? "New Quotation" : tab === "budget" ? "New Allocation" : "Log Revenue"}
           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Total Revenue</div><div className="text-xl font-bold text-white font-mono">{formatNaira(totalRev)}</div><div className="text-xs text-emerald-400 mt-1 font-mono">{formatNaira(totalReceived)} received</div></div>
-        <div className="bg-[#10101C] border border-white/6 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Total Costs</div><div className="text-xl font-bold text-white font-mono">{formatNaira(totalCost)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{costEntries.filter((e: any) => e.paid).length} paid</div></div>
+        <div className="bg-[#10101C] border border-white/6 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Total Expenditure</div><div className="text-xl font-bold text-white font-mono">{formatNaira(totalCost)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{costEntries.filter((e: any) => e.paid).length} paid</div></div>
         <div className="bg-[#10101C] border border-emerald-400/20 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Gross Margin</div><div className="text-xl font-bold text-emerald-400 font-mono">{formatNaira(totalRev - totalCost)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{totalRev > 0 ? Math.round(((totalRev - totalCost) / totalRev) * 100) : 0}% margin</div></div>
         <div className="bg-[#10101C] border border-amber-400/20 rounded-2xl p-4"><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-2">Outstanding</div><div className="text-xl font-bold text-amber-400 font-mono">{formatNaira(outstanding)}</div><div className="text-xs text-[#7070A0] mt-1 font-mono">{invoices.filter((i: any) => effectiveInvoiceStatus(i) === "overdue").length} overdue</div></div>
       </div>
 
       <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
         <div className="flex border-b border-white/6">
-          {(["revenue","costs","invoices","quotations"] as const).map(t => (
+          {(["revenue","costs","invoices","quotations","budget"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)} className={`px-5 py-3.5 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${tab === t ? "text-white border-[#FF4D00]" : "text-[#7070A0] border-transparent hover:text-white"}`}>
-              {t === "revenue" ? `Revenue (${revenueEntries.length})` : t === "costs" ? `Costs (${costEntries.length})` : t === "invoices" ? `Invoices (${invoices.length})` : `Quotations (${quotations.length})`}
+              {t === "revenue" ? `Revenue (${revenueEntries.length})` : t === "costs" ? `Expenditure (${costEntries.length})` : t === "invoices" ? `Invoices (${invoices.length})` : t === "quotations" ? `Quotations (${quotations.length})` : `Budget Tracker (${budgetAllocations.length})`}
             </button>
           ))}
         </div>
@@ -1381,7 +1504,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-xs text-[#7070A0]">{e.client_id ? clientMap[e.client_id] ?? "—" : "—"}</td>
                     <td className="px-5 py-3.5"><PillarBadge pillar={e.pillar} /></td>
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{e.entry_month ? new Date(e.entry_month).toLocaleDateString("en-GB",{month:"short",year:"numeric"}) : "—"}</td>
-                    <td className="px-5 py-3.5 text-sm font-mono font-semibold text-emerald-400">{formatNaira(e.amount)}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono font-semibold text-emerald-400">{formatMoney(e.amount, e.currency)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={e.payment_status} /></td>
                     <td className="px-5 py-3.5"><RowActions onEdit={() => onEditRevenue(e)} onArchive={() => onArchiveRevenue(e)} archiveLabel={e.description} /></td>
                   </tr>
@@ -1392,26 +1515,42 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
 
           if (tab === "costs") return costEntries.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center px-5">
-              <p className="text-sm text-[#7070A0] mb-4">No costs logged yet.</p>
-              <button onClick={() => onNew("cost")} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> Log First Cost</button>
+              <p className="text-sm text-[#7070A0] mb-4">No expenditure logged yet.</p>
+              <button onClick={() => onNew("cost")} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> Log First Expenditure</button>
             </div>
           ) : (
-            <table className="w-full">
-              <thead><tr className="border-b border-white/5">{["Description","Project","Category","Month","Amount","Paid",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
-              <tbody>
-                {costEntries.map((e: any) => (
-                  <tr key={e.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
-                    <td className="px-5 py-3.5 text-sm text-white">{e.description}</td>
-                    <td className="px-5 py-3.5 text-xs text-[#7070A0]">{e.project_id ? projectMap[e.project_id] ?? "—" : "—"}</td>
-                    <td className="px-5 py-3.5 text-xs font-mono text-[#B0ADCC] capitalize">{e.category?.replace(/_/g, " ")}</td>
-                    <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{e.entry_month ? new Date(e.entry_month).toLocaleDateString("en-GB",{month:"short",year:"numeric"}) : "—"}</td>
-                    <td className="px-5 py-3.5 text-sm font-mono font-semibold text-red-400">{formatNaira(e.amount)}</td>
-                    <td className="px-5 py-3.5"><span className={`text-xs font-mono ${e.paid ? "text-emerald-400" : "text-[#7070A0]"}`}>{e.paid ? "Paid" : "Unpaid"}</span></td>
-                    <td className="px-5 py-3.5"><RowActions onEdit={() => onEditCost(e)} onArchive={() => onArchiveCost(e)} archiveLabel={e.description} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div>
+              {spendByPillar.length > 0 && (
+                <div className="p-5 border-b border-white/6">
+                  <div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-3">Spending Breakdown by Pillar</div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <PieChart>
+                      <Pie data={spendByPillar} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                        {spendByPillar.map((s, i) => <Cell key={i} fill={PILLAR_CHART_COLORS[s.pillar] ?? "#7070A0"} />)}
+                      </Pie>
+                      <Tooltip formatter={(v: number) => formatNaira(v)} contentStyle={{ background: "#1A1A2E", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, fontSize: 12 }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+              <table className="w-full">
+                <thead><tr className="border-b border-white/5">{["Description","Project","Category","Month","Amount","Paid",""].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+                <tbody>
+                  {costEntries.map((e: any) => (
+                    <tr key={e.id} className="border-b border-white/4 last:border-0 hover:bg-white/2 transition-colors">
+                      <td className="px-5 py-3.5 text-sm text-white">{e.description}</td>
+                      <td className="px-5 py-3.5 text-xs text-[#7070A0]">{e.project_id ? projectMap[e.project_id] ?? "—" : "—"}</td>
+                      <td className="px-5 py-3.5 text-xs font-mono text-[#B0ADCC] capitalize">{e.category?.replace(/_/g, " ")}</td>
+                      <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{e.entry_month ? new Date(e.entry_month).toLocaleDateString("en-GB",{month:"short",year:"numeric"}) : "—"}</td>
+                      <td className="px-5 py-3.5 text-sm font-mono font-semibold text-red-400">{formatMoney(e.amount, e.currency)}</td>
+                      <td className="px-5 py-3.5"><span className={`text-xs font-mono ${e.paid ? "text-emerald-400" : "text-[#7070A0]"}`}>{e.paid ? "Paid" : "Unpaid"}</span></td>
+                      <td className="px-5 py-3.5"><RowActions onEdit={() => onEditCost(e)} onArchive={() => onArchiveCost(e)} archiveLabel={e.description} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           );
 
           if (tab === "invoices") return invoices.length === 0 ? (
@@ -1429,7 +1568,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-sm text-white">{clientMap[inv.client_id] ?? "—"}</td>
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{formatDate(inv.issued_date)}</td>
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">{formatDate(inv.due_date)}</td>
-                    <td className="px-5 py-3.5 text-sm font-mono font-semibold text-white">{formatNaira(inv.total)}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono font-semibold text-white">{formatMoney(inv.total, inv.currency)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={effectiveInvoiceStatus(inv)} /></td>
                     <td className="px-5 py-3.5"><RowActions onEdit={() => onEditInvoice(inv)} onArchive={() => onArchiveInvoice(inv)} archiveLabel={inv.invoice_number} /></td>
                   </tr>
@@ -1437,6 +1576,41 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
               </tbody>
             </table>
           );
+
+          if (tab === "budget") {
+            if (!p6Ready) return <div className="p-5"><P6SetupBanner /></div>;
+            return budgetVsActual.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center px-5">
+                <p className="text-sm text-[#7070A0] mb-4">No budget allocations set yet.</p>
+                <button onClick={() => onNew("budget")} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors mx-auto"><Plus size={15} /> New Allocation</button>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/4">
+                {budgetVsActual.map((b: any) => {
+                  const allocation = budgetAllocations.find((a: any) => a.id === b.id);
+                  const pct = b.allocated_ngn > 0 ? Math.min((Number(b.spent_ngn) / Number(b.allocated_ngn)) * 100, 100) : 0;
+                  const over = Number(b.spent_ngn) > Number(b.allocated_ngn);
+                  return (
+                    <div key={b.id} className="px-5 py-4">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="text-sm text-white">
+                          {b.pillar ? PILLARS[b.pillar] : "Company-wide"}{b.category ? ` · ${String(b.category).replace(/_/g, " ")}` : ""}
+                          <span className="ml-2 text-xs font-mono text-[#7070A0]">{b.month ? `${b.year}-${String(b.month).padStart(2,"0")}` : `${b.year} (Annual)`}</span>
+                        </div>
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                          <span className={`text-xs font-mono ${over ? "text-red-400" : "text-[#7070A0]"}`}>{formatNaira(Number(b.spent_ngn))} / {formatNaira(Number(b.allocated_ngn))}</span>
+                          {allocation && <RowActions onEdit={() => onEditBudget(allocation)} onArchive={() => onArchiveBudget(allocation)} archiveLabel={PILLARS[b.pillar] ?? "Company-wide"} />}
+                        </div>
+                      </div>
+                      <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full transition-all ${over ? "bg-red-400" : "bg-emerald-400"}`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          }
 
           return quotations.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center px-5">
@@ -1452,7 +1626,7 @@ const FinancePage = ({ p2Ready, revenueEntries, costEntries, invoices, lineItems
                     <td className="px-5 py-3.5 text-sm text-white">{q.title}</td>
                     <td className="px-5 py-3.5 text-sm text-[#7070A0]">{clientMap[q.client_id] ?? "—"}</td>
                     <td className="px-5 py-3.5 text-xs font-mono text-[#7070A0]">v{q.version}</td>
-                    <td className="px-5 py-3.5 text-sm font-mono text-white">{formatNaira(q.total)}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono text-white">{formatMoney(q.total, q.currency)}</td>
                     <td className="px-5 py-3.5"><StatusBadge status={q.status} /></td>
                     <td className="px-5 py-3.5">
                       {q.status !== "accepted" && q.status !== "declined" && (
@@ -1498,7 +1672,7 @@ const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loadi
       const monthMatch = !t.month || d.getMonth() + 1 === t.month;
       const pillarMatch = !t.pillar || e.pillar === t.pillar;
       return yearMatch && monthMatch && pillarMatch;
-    }).reduce((s: number, e: any) => s + Number(e.amount), 0);
+    }).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
   };
 
   const annualTargets = targets.filter((t: any) => !t.month);
@@ -1564,6 +1738,218 @@ const TargetsPage = ({ p2Ready, targets, revenueEntries, onNew, onRefresh, loadi
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Reports ──────────────────────────────────────────────────────────────────
+// Reuses the same window.print() HTML-string pattern as printInvoice (see above)
+// so "Save as PDF" works the same way everywhere in the app, with no new
+// dependency — this platform has no server-side PDF rendering available.
+const printReport = (title: string, subtitle: string, rows: { label: string; value: string }[][], headers: string[]) => {
+  const rowsHTML = rows.map(r => `<tr>${r.map((c, i) => `<td style="padding:10px 16px;border-bottom:1px solid #f0f0f0;font-size:13px;${i > 0 ? "text-align:right;font-family:monospace;" : ""}">${c.value}</td>`).join("")}</tr>`).join("");
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+  <style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:'Helvetica Neue',Arial,sans-serif;color:#111;background:#fff;padding:40px;max-width:800px;margin:0 auto;}
+  .header{margin-bottom:32px;padding-bottom:24px;border-bottom:3px solid #FF4D00;}
+  .brand{font-size:22px;font-weight:800;color:#FF4D00;letter-spacing:-0.5px;}
+  .title{font-size:20px;font-weight:800;color:#111;margin-top:12px;}
+  .subtitle{font-size:13px;color:#666;margin-top:4px;}
+  table{width:100%;border-collapse:collapse;margin-bottom:24px;}
+  thead th{background:#f8f8f8;padding:10px 16px;font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:#666;font-weight:600;text-align:left;}
+  thead th:not(:first-child){text-align:right;}
+  .footer{margin-top:40px;padding-top:16px;border-top:1px solid #eee;font-size:11px;color:#999;text-align:center;}
+  @media print{body{padding:24px;}}</style></head>
+  <body>
+  <div class="header"><div class="brand">Break The Eyes Media</div><div class="title">${title}</div><div class="subtitle">${subtitle}</div></div>
+  <table><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rowsHTML}</tbody></table>
+  <div class="footer">Generated ${new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"})}</div>
+  <script>window.onload=()=>window.print();</script>
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (w) { w.document.write(html); w.document.close(); }
+};
+
+const PERIOD_OPTIONS = [
+  { id: "month", label: "This Month" },
+  { id: "quarter", label: "This Quarter" },
+  { id: "year", label: "This Year" },
+] as const;
+
+const periodRange = (period: "month" | "quarter" | "year") => {
+  const now = new Date();
+  if (period === "month") return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth() + 1, 1) };
+  if (period === "quarter") { const q = Math.floor(now.getMonth() / 3); return { start: new Date(now.getFullYear(), q * 3, 1), end: new Date(now.getFullYear(), q * 3 + 3, 1) }; }
+  return { start: new Date(now.getFullYear(), 0, 1), end: new Date(now.getFullYear() + 1, 0, 1) };
+};
+
+const ReportsPage = ({ p2Ready, clients, projects, revenueEntries, costEntries, invoices }: {
+  p2Ready: boolean; clients: any[]; projects: any[]; revenueEntries: any[]; costEntries: any[]; invoices: any[];
+}) => {
+  const [reportType, setReportType] = useState<"financial" | "projects" | "client">("financial");
+  const [period, setPeriod] = useState<"month" | "quarter" | "year">("month");
+  const [clientId, setClientId] = useState("");
+
+  if (!p2Ready) return (
+    <div className="space-y-5">
+      <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Reports</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Reports</h1></div>
+      <P2SetupBanner />
+    </div>
+  );
+
+  const { start, end } = periodRange(period);
+  const inRange = (d: string | null) => { if (!d) return false; const dt = new Date(d); return dt >= start && dt < end; };
+
+  const periodRevenue = revenueEntries.filter((e: any) => inRange(e.entry_month));
+  const periodCost = costEntries.filter((e: any) => inRange(e.entry_month));
+
+  const financialByPillar = Object.entries(PILLARS).map(([key, label]) => {
+    const rev = periodRevenue.filter((e: any) => e.pillar === key).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+    const cost = periodCost.filter((e: any) => e.pillar === key).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+    return { pillar: key, label, rev, cost, margin: rev - cost };
+  }).filter(r => r.rev > 0 || r.cost > 0);
+  const totalRev = financialByPillar.reduce((s, r) => s + r.rev, 0);
+  const totalCost = financialByPillar.reduce((s, r) => s + r.cost, 0);
+
+  const projectRows = projects.filter((p: any) => !p.archived_at).map((p: any) => {
+    const rev = revenueEntries.filter((e: any) => e.project_id === p.id).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+    const cost = costEntries.filter((e: any) => e.project_id === p.id).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+    return { project: p, rev, cost, margin: rev - cost };
+  });
+
+  const selectedClient = clients.find((c: any) => c.id === clientId);
+  const clientProjects = projects.filter((p: any) => p.client_id === clientId);
+  const clientProjectIds = new Set(clientProjects.map((p: any) => p.id));
+  const clientInvoices = invoices.filter((i: any) => i.client_id === clientId);
+  const clientRevenue = revenueEntries.filter((e: any) => e.client_id === clientId || clientProjectIds.has(e.project_id));
+  const clientCost = costEntries.filter((e: any) => e.client_id === clientId || clientProjectIds.has(e.project_id));
+
+  const doPrint = () => {
+    if (reportType === "financial") {
+      printReport("Financial Statement", `${PERIOD_OPTIONS.find(p => p.id === period)?.label} · by pillar (NGN-equivalent)`,
+        [...financialByPillar.map(r => [{ label: "pillar", value: r.label }, { label: "rev", value: formatNaira(r.rev) }, { label: "cost", value: formatNaira(r.cost) }, { label: "margin", value: formatNaira(r.margin) }]),
+         [{ label: "pillar", value: "Total" }, { label: "rev", value: formatNaira(totalRev) }, { label: "cost", value: formatNaira(totalCost) }, { label: "margin", value: formatNaira(totalRev - totalCost) }]],
+        ["Pillar", "Revenue", "Expenditure", "Margin"]);
+    } else if (reportType === "projects") {
+      printReport("Project Summary", `${projectRows.length} active projects`,
+        projectRows.map(r => [{ label: "name", value: r.project.name }, { label: "status", value: STATUS_CFG[r.project.status]?.label ?? r.project.status }, { label: "rev", value: formatNaira(r.rev) }, { label: "cost", value: formatNaira(r.cost) }, { label: "margin", value: formatNaira(r.margin) }]),
+        ["Project", "Status", "Revenue", "Expenditure", "Margin"]);
+    } else if (selectedClient) {
+      printReport(`Client Report — ${selectedClient.name}`, `${clientProjects.length} projects · ${clientInvoices.length} invoices`,
+        clientInvoices.map(i => [{ label: "inv", value: i.invoice_number }, { label: "status", value: STATUS_CFG[effectiveInvoiceStatus(i)]?.label ?? i.status }, { label: "total", value: formatMoney(i.total, i.currency) }]),
+        ["Invoice", "Status", "Total"]);
+    }
+  };
+
+  const doExport = () => {
+    if (reportType === "financial") exportCSV(financialByPillar.map(r => ({ pillar: r.label, revenue: r.rev, expenditure: r.cost, margin: r.margin })), "financial-statement");
+    else if (reportType === "projects") exportCSV(projectRows.map(r => ({ project: r.project.name, status: r.project.status, revenue: r.rev, expenditure: r.cost, margin: r.margin })), "project-summary");
+    else if (selectedClient) exportCSV(clientInvoices, `client-report-${selectedClient.name}`);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Reports</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Reports</h1></div>
+        <div className="flex gap-2">
+          <button onClick={doExport} title="Export CSV" className="p-2 rounded-lg hover:bg-white/5 text-[#7070A0] hover:text-white transition-colors"><Download size={15} /></button>
+          <button onClick={doPrint} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors"><Receipt size={15} /> Print / Save as PDF</button>
+        </div>
+      </div>
+
+      <div className="bg-[#10101C] border border-white/6 rounded-2xl p-5 flex flex-wrap gap-4">
+        <Field label="Report Type">
+          <select className={selectCls} value={reportType} onChange={e => setReportType(e.target.value as any)}>
+            <option value="financial">Financial Statement</option>
+            <option value="projects">Project Summary</option>
+            <option value="client">Client Report</option>
+          </select>
+        </Field>
+        {reportType === "financial" && (
+          <Field label="Period"><select className={selectCls} value={period} onChange={e => setPeriod(e.target.value as any)}>{PERIOD_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select></Field>
+        )}
+        {reportType === "client" && (
+          <Field label="Client"><select className={selectCls} value={clientId} onChange={e => setClientId(e.target.value)}><option value="">Select client…</option>{clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
+        )}
+      </div>
+
+      <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
+        {reportType === "financial" && (
+          financialByPillar.length === 0 ? (
+            <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No revenue or expenditure recorded for this period.</p></div>
+          ) : (
+            <table className="w-full">
+              <thead><tr className="border-b border-white/5">{["Pillar","Revenue","Expenditure","Margin"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <tbody>
+                {financialByPillar.map(r => (
+                  <tr key={r.pillar} className="border-b border-white/4 last:border-0">
+                    <td className="px-5 py-3.5 text-sm text-white">{r.label}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono text-emerald-400">{formatNaira(r.rev)}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono text-red-400">{formatNaira(r.cost)}</td>
+                    <td className={`px-5 py-3.5 text-sm font-mono ${r.margin >= 0 ? "text-white" : "text-red-400"}`}>{formatNaira(r.margin)}</td>
+                  </tr>
+                ))}
+                <tr className="bg-white/2">
+                  <td className="px-5 py-3.5 text-sm font-semibold text-white">Total</td>
+                  <td className="px-5 py-3.5 text-sm font-mono font-semibold text-emerald-400">{formatNaira(totalRev)}</td>
+                  <td className="px-5 py-3.5 text-sm font-mono font-semibold text-red-400">{formatNaira(totalCost)}</td>
+                  <td className="px-5 py-3.5 text-sm font-mono font-semibold text-white">{formatNaira(totalRev - totalCost)}</td>
+                </tr>
+              </tbody>
+            </table>
+          )
+        )}
+
+        {reportType === "projects" && (
+          projectRows.length === 0 ? (
+            <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No active projects.</p></div>
+          ) : (
+            <table className="w-full">
+              <thead><tr className="border-b border-white/5">{["Project","Status","Revenue","Expenditure","Margin"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+              <tbody>
+                {projectRows.map(r => (
+                  <tr key={r.project.id} className="border-b border-white/4 last:border-0">
+                    <td className="px-5 py-3.5 text-sm text-white">{r.project.name}</td>
+                    <td className="px-5 py-3.5"><StatusBadge status={r.project.status} /></td>
+                    <td className="px-5 py-3.5 text-sm font-mono text-emerald-400">{formatNaira(r.rev)}</td>
+                    <td className="px-5 py-3.5 text-sm font-mono text-red-400">{formatNaira(r.cost)}</td>
+                    <td className={`px-5 py-3.5 text-sm font-mono ${r.margin >= 0 ? "text-white" : "text-red-400"}`}>{formatNaira(r.margin)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+
+        {reportType === "client" && (
+          !selectedClient ? (
+            <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">Select a client above to generate their report.</p></div>
+          ) : (
+            <div>
+              <div className="grid grid-cols-3 gap-4 p-5 border-b border-white/6 text-xs">
+                <div><div className="text-[#7070A0] font-mono mb-1">Projects</div><div className="font-mono text-white">{clientProjects.length}</div></div>
+                <div><div className="text-[#7070A0] font-mono mb-1">Revenue</div><div className="font-mono text-emerald-400">{formatNaira(clientRevenue.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0))}</div></div>
+                <div><div className="text-[#7070A0] font-mono mb-1">Expenditure</div><div className="font-mono text-red-400">{formatNaira(clientCost.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0))}</div></div>
+              </div>
+              {clientInvoices.length === 0 ? (
+                <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No invoices for this client yet.</p></div>
+              ) : (
+                <table className="w-full">
+                  <thead><tr className="border-b border-white/5">{["Invoice #","Status","Total"].map(h => <th key={h} className="text-left text-xs font-mono text-[#7070A0] uppercase tracking-widest px-5 py-3">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {clientInvoices.map((i: any) => (
+                      <tr key={i.id} className="border-b border-white/4 last:border-0">
+                        <td className="px-5 py-3.5 font-mono text-sm text-[#FF4D00] font-semibold">{i.invoice_number}</td>
+                        <td className="px-5 py-3.5"><StatusBadge status={effectiveInvoiceStatus(i)} /></td>
+                        <td className="px-5 py-3.5 text-sm font-mono text-white">{formatMoney(i.total, i.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )
+        )}
+      </div>
     </div>
   );
 };
@@ -1667,6 +2053,7 @@ const NewEventModal = ({ clients, projects, staff, record, onClose, onSaved }: {
     event_type: record?.event_type ?? "corporate", status: record?.status ?? "planning", event_date: record?.event_date ?? "", end_date: record?.end_date ?? "",
     venue: record?.venue ?? "", city: record?.city ?? "", expected_guests: record?.expected_guests != null ? String(record.expected_guests) : "",
     budget: record?.budget != null ? String(record.budget) : "", lead_id: record?.lead_id ?? "", brief: record?.brief ?? "",
+    currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -1680,6 +2067,7 @@ const NewEventModal = ({ clients, projects, staff, record, onClose, onSaved }: {
       event_date: f.event_date, end_date: f.end_date || null, venue: f.venue || null, city: f.city || null,
       expected_guests: f.expected_guests ? parseInt(f.expected_guests) : null,
       budget: f.budget ? parseFloat(f.budget) : null, lead_id: f.lead_id || null, brief: f.brief || null,
+      currency: f.currency as any, fx_rate_to_ngn: f.currency === "NGN" ? 1 : parseFloat(f.fx_rate_to_ngn),
     };
     const { error } = record ? await supabase.from("events").update(payload).eq("id", record.id) : await supabase.from("events").insert(payload);
     setSaving(false);
@@ -1708,8 +2096,9 @@ const NewEventModal = ({ clients, projects, staff, record, onClose, onSaved }: {
         </div>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Expected Guests"><input type="number" min="0" className={inputCls} placeholder="250" value={f.expected_guests} onChange={e => set("expected_guests", e.target.value)} /></Field>
-          <Field label="Budget (₦)"><input type="number" min="0" step="0.01" className={inputCls} placeholder="5000000" value={f.budget} onChange={e => set("budget", e.target.value)} /></Field>
+          <Field label={`Budget (${CURRENCY_SYMBOLS[f.currency] ?? f.currency})`}><input type="number" min="0" step="0.01" className={inputCls} placeholder="5000000" value={f.budget} onChange={e => set("budget", e.target.value)} /></Field>
         </div>
+        <CurrencyFXFields currency={f.currency} fxRate={f.fx_rate_to_ngn} onCurrency={v => set("currency", v)} onFxRate={v => set("fx_rate_to_ngn", v)} />
         <Field label="Client"><select className={selectCls} value={f.client_id} onChange={e => set("client_id", e.target.value)}><option value="">— None —</option>{clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
         <Field label="Linked Project"><select className={selectCls} value={f.project_id} onChange={e => set("project_id", e.target.value)}><option value="">— None —</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
         <Field label="Brief"><textarea className={`${inputCls} min-h-20`} placeholder="Event objectives, scope, key notes…" value={f.brief} onChange={e => set("brief", e.target.value)} /></Field>
@@ -1831,8 +2220,8 @@ const parseAttendeeCSV = (text: string): { name: string; email: string; phone: s
 
 const EVENT_PERSON_ROLE_LABELS: Record<string, string> = { speaker: "Speaker", guest: "Guest", moderator: "Moderator", performer: "Performer" };
 
-const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, onRefresh, onGoLive, onEdit, onArchive }: {
-  event: any; clients: any[]; projects: any[]; staff: any[]; p3bReady: boolean; onBack: () => void; onRefresh: () => void; onGoLive: () => void;
+const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, onRefresh, onGoLive, onAddExpense, onEdit, onArchive }: {
+  event: any; clients: any[]; projects: any[]; staff: any[]; p3bReady: boolean; onBack: () => void; onRefresh: () => void; onGoLive: () => void; onAddExpense: () => void;
   onEdit: (e: any) => void; onArchive: (e: any) => void;
 }) => {
   const [crew, setCrew] = useState<any[]>([]);
@@ -1930,6 +2319,9 @@ const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, on
             <button onClick={onGoLive} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] transition-colors">
               <Clock size={15} /> Go Live
             </button>
+            <button onClick={onAddExpense} className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/10 text-[#7070A0] text-sm hover:bg-white/5 hover:text-white transition-colors">
+              <Plus size={15} /> Add Expense
+            </button>
             <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-2 text-white" defaultValue={event.status} onChange={e => updateStatus(e.target.value)}>
               {["planning","confirmed","in_progress","completed","cancelled"].map(s => <option key={s} value={s}>{STATUS_CFG[s]?.label}</option>)}
             </select>
@@ -1941,7 +2333,7 @@ const EventDetailPage = ({ event, clients, projects, staff, p3bReady, onBack, on
           <div><div className="text-[#7070A0] font-mono mb-1">Date</div><div className="text-white">{formatDate(event.event_date)}{event.end_date ? ` – ${formatDate(event.end_date)}` : ""}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Venue</div><div className="text-white">{[event.venue, event.city].filter(Boolean).join(", ") || "—"}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Guests</div><div className="text-white font-mono">{event.expected_guests ?? "—"}</div></div>
-          <div><div className="text-[#7070A0] font-mono mb-1">Budget</div><div className="text-white font-mono">{formatNaira(Number(event.budget || 0))}</div></div>
+          <div><div className="text-[#7070A0] font-mono mb-1">Budget</div><div className="text-white font-mono">{formatMoney(Number(event.budget || 0), event.currency)}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Client</div><div className="text-white">{clientName ?? "—"}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Project</div><div className="text-white">{projectName ?? "—"}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Event Lead</div><div className="text-white">{leadName ?? "—"}</div></div>
@@ -2212,33 +2604,33 @@ ON CONFLICT DO NOTHING;`;
 const MIGRATION_SQL_P4_SECURITY = `-- BTE Admin Portal — Phase 4b Migration (Role-aware RLS)
 -- Run AFTER Phase 4. Paste into: Supabase Dashboard → SQL Editor → Run
 
-CREATE OR REPLACE FUNCTION current_role() RETURNS text LANGUAGE sql STABLE AS $$
+CREATE OR REPLACE FUNCTION bte_role() RETURNS text LANGUAGE sql STABLE AS $$
   SELECT role FROM profiles WHERE id = auth.uid();
 $$;
 
 -- Finance & Targets — founder + ops_lead only
 DROP POLICY IF EXISTS "auth_all_revenue_entries" ON revenue_entries;
-CREATE POLICY "role_revenue_entries" ON revenue_entries FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_revenue_entries" ON revenue_entries FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_cost_entries" ON cost_entries;
-CREATE POLICY "role_cost_entries" ON cost_entries FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_cost_entries" ON cost_entries FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_invoices" ON invoices;
-CREATE POLICY "role_invoices" ON invoices FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_invoices" ON invoices FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_invoice_line_items" ON invoice_line_items;
-CREATE POLICY "role_invoice_line_items" ON invoice_line_items FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_invoice_line_items" ON invoice_line_items FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_quotations" ON quotations;
-CREATE POLICY "role_quotations" ON quotations FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_quotations" ON quotations FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_targets" ON targets;
-CREATE POLICY "role_targets" ON targets FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_targets" ON targets FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 
 -- Vendors & Purchase Orders — founder + ops_lead only
 DROP POLICY IF EXISTS "auth_all_vendors" ON vendors;
-CREATE POLICY "role_vendors" ON vendors FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_vendors" ON vendors FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 DROP POLICY IF EXISTS "auth_all_purchase_orders" ON purchase_orders;
-CREATE POLICY "role_purchase_orders" ON purchase_orders FOR ALL TO authenticated USING (current_role() IN ('founder','ops_lead')) WITH CHECK (current_role() IN ('founder','ops_lead'));
+CREATE POLICY "role_purchase_orders" ON purchase_orders FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead'));
 
 -- Payroll — founder only
 DROP POLICY IF EXISTS "auth_all_payroll_entries" ON payroll_entries;
-CREATE POLICY "role_payroll_entries" ON payroll_entries FOR ALL TO authenticated USING (current_role() = 'founder') WITH CHECK (current_role() = 'founder');
+CREATE POLICY "role_payroll_entries" ON payroll_entries FOR ALL TO authenticated USING (bte_role() = 'founder') WITH CHECK (bte_role() = 'founder');
 
 -- Profiles — everyone can read (needed for role bootstrap + team list), anyone may
 -- insert only their own row (first-sign-in bootstrap), but only founder may change
@@ -2247,8 +2639,8 @@ DROP POLICY IF EXISTS "auth_all_profiles" ON profiles;
 CREATE POLICY "profiles_select_all" ON profiles FOR SELECT TO authenticated USING (true);
 CREATE POLICY "profiles_insert_own" ON profiles FOR INSERT TO authenticated WITH CHECK (id = auth.uid());
 CREATE POLICY "profiles_update_founder_or_self_noop" ON profiles FOR UPDATE TO authenticated
-  USING (current_role() = 'founder' OR id = auth.uid())
-  WITH CHECK (current_role() = 'founder' OR (id = auth.uid() AND role = current_role()));`;
+  USING (bte_role() = 'founder' OR id = auth.uid())
+  WITH CHECK (bte_role() = 'founder' OR (id = auth.uid() AND role = bte_role()));`;
 
 const P4SecurityBanner = () => {
   const [copied, setCopied] = useState(false);
@@ -2391,28 +2783,142 @@ const P5bInfoBanner = () => {
   );
 };
 
+// ─── Phase 6 Migration SQL (Currency · Budget Tracker · Client Portfolio) ──────
+// Founder feedback round: multi-currency (manual FX rate per non-NGN entry, so
+// aggregates can still sum an NGN-equivalent), a company/project budget tracker,
+// expenditure that can attach to a client and/or event (not just a project), a
+// donation/grant revenue type, and the new Client Portfolio tables (documents +
+// notes — the portfolio's "timeline" tab needs no new table, it's a client-side
+// merge of these plus existing records' created_at timestamps).
+const MIGRATION_SQL_P6 = `-- BTE Admin Portal — Phase 6 Migration (Currency · Budget Tracker · Client Portfolio)
+-- Run AFTER Phase 4b (reuses bte_role(), redefined here too so order doesn't matter).
+-- Paste into: Supabase Dashboard → SQL Editor → Run
+
+CREATE OR REPLACE FUNCTION bte_role() RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT role FROM profiles WHERE id = auth.uid();
+$$;
+
+DO $$ BEGIN CREATE TYPE currency_code AS ENUM ('NGN','USD','GBP','EUR'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER TYPE revenue_type_enum ADD VALUE IF NOT EXISTS 'donation'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER TYPE revenue_type_enum ADD VALUE IF NOT EXISTS 'grant'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE revenue_entries ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE revenue_entries ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS client_id uuid REFERENCES clients(id) ON DELETE SET NULL;
+ALTER TABLE cost_entries ADD COLUMN IF NOT EXISTS event_id uuid REFERENCES events(id) ON DELETE SET NULL;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1;
+ALTER TABLE contracts ADD COLUMN IF NOT EXISTS currency currency_code NOT NULL DEFAULT 'NGN';
+
+CREATE TABLE IF NOT EXISTS budget_allocations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), year int NOT NULL, month int, pillar pillar, category cost_category_enum, allocated_amount numeric(14,2) NOT NULL, currency currency_code NOT NULL DEFAULT 'NGN', fx_rate_to_ngn numeric(14,4) NOT NULL DEFAULT 1, notes text, archived_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+DROP TRIGGER IF EXISTS budget_allocations_updated_at ON budget_allocations; CREATE TRIGGER budget_allocations_updated_at BEFORE UPDATE ON budget_allocations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS client_documents (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), client_id uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name text NOT NULL, file_path text NOT NULL, uploaded_by uuid REFERENCES profiles(id) ON DELETE SET NULL, created_at timestamptz NOT NULL DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS client_notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), client_id uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE, author_id uuid REFERENCES profiles(id) ON DELETE SET NULL, body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+
+CREATE OR REPLACE VIEW v_budget_vs_actual AS
+SELECT b.id, b.year, b.month, b.pillar, b.category, b.allocated_amount * b.fx_rate_to_ngn as allocated_ngn,
+  COALESCE((SELECT SUM(c.amount * c.fx_rate_to_ngn) FROM cost_entries c
+    WHERE c.archived_at IS NULL
+      AND EXTRACT(YEAR FROM c.entry_month) = b.year
+      AND (b.month IS NULL OR EXTRACT(MONTH FROM c.entry_month) = b.month)
+      AND (b.pillar IS NULL OR c.pillar = b.pillar)
+      AND (b.category IS NULL OR c.category = b.category)
+  ), 0) as spent_ngn
+FROM budget_allocations b WHERE b.archived_at IS NULL;
+
+-- Re-point the Phase 2 aggregate views at NGN-equivalents (amount * fx_rate_to_ngn)
+-- now that revenue/cost entries can carry a non-NGN currency, so a mixed-currency
+-- book of business still rolls up into one blended number everywhere it already did.
+CREATE OR REPLACE VIEW v_monthly_pnl AS
+SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, SUM(amount * fx_rate_to_ngn) as revenue, 0::numeric as costs FROM revenue_entries GROUP BY 1,2,3
+UNION ALL
+SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, 0::numeric as revenue, SUM(amount * fx_rate_to_ngn) as costs FROM cost_entries GROUP BY 1,2,3;
+
+CREATE OR REPLACE VIEW v_project_financials AS
+SELECT p.id as project_id, p.name as project_name, p.budget * p.fx_rate_to_ngn as budget,
+  COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM revenue_entries WHERE project_id = p.id), 0) as revenue,
+  COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM cost_entries WHERE project_id = p.id), 0) as cost,
+  COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM revenue_entries WHERE project_id = p.id), 0)
+    - COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM cost_entries WHERE project_id = p.id), 0) as margin,
+  (p.budget * p.fx_rate_to_ngn) - COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM cost_entries WHERE project_id = p.id), 0) as budget_variance
+FROM projects p WHERE p.archived_at IS NULL;
+
+CREATE OR REPLACE VIEW v_targets_progress AS
+SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount * re.fx_rate_to_ngn) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='revenue'
+UNION ALL
+SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount * re.fx_rate_to_ngn) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) - COALESCE((SELECT SUM(ce.amount * ce.fx_rate_to_ngn) FROM cost_entries ce WHERE (t.pillar IS NULL OR ce.pillar=t.pillar) AND EXTRACT(YEAR FROM ce.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM ce.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='profit';
+
+INSERT INTO storage.buckets (id, name, public) VALUES ('client-documents', 'client-documents', false) ON CONFLICT DO NOTHING;
+
+ALTER TABLE budget_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE client_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE client_notes ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN CREATE POLICY "role_budget_allocations" ON budget_allocations FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "role_client_documents" ON client_documents FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead','team_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead','team_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "role_client_notes" ON client_notes FOR ALL TO authenticated USING (bte_role() IN ('founder','ops_lead','team_lead')) WITH CHECK (bte_role() IN ('founder','ops_lead','team_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "client_documents_select" ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'client-documents' AND bte_role() IN ('founder','ops_lead','team_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "client_documents_insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'client-documents' AND bte_role() IN ('founder','ops_lead','team_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "client_documents_delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'client-documents' AND bte_role() IN ('founder','ops_lead','team_lead')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`;
+
+const P6SetupBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P6); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-amber-400/20 rounded-2xl p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={18} className="text-amber-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <h3 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Phase 6 database not set up</h3>
+          <p className="text-sm text-[#7070A0]">Copy the SQL below and run it in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a>, then refresh.</p>
+        </div>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-xl p-4 overflow-auto max-h-48 whitespace-pre-wrap break-all">{MIGRATION_SQL_P6}</pre>
+        <button onClick={copy} className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={13} /> : <Database size={13} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+      <button onClick={() => window.location.reload()} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 text-[#7070A0] text-sm hover:bg-white/5 hover:text-white transition-colors">
+        <RefreshCw size={14} /> Refresh after running SQL
+      </button>
+    </div>
+  );
+};
+
 // ─── RBAC (UI-level) ──────────────────────────────────────────────────────────
 
-type Role = "founder" | "ops_lead" | "team_lead" | "member";
+type Role = "founder" | "ops_lead" | "marketing_lead" | "design_lead" | "team_lead" | "member";
 
 const ROLE_LABELS: Record<Role, string> = {
-  founder: "Founder", ops_lead: "Ops Lead", team_lead: "Team Lead", member: "Member",
+  founder: "Founder", ops_lead: "Ops Lead", marketing_lead: "Marketing Lead", design_lead: "Design & Brand Lead", team_lead: "Team Lead", member: "Member",
 };
 
 // Which pages each role may open. Deny by default.
 const PAGE_ACCESS: Record<string, Role[]> = {
-  dashboard: ["founder", "ops_lead", "team_lead", "member"],
-  clients:   ["founder", "ops_lead", "team_lead"],
-  leads:     ["founder", "ops_lead", "team_lead"],
-  projects:  ["founder", "ops_lead", "team_lead", "member"],
-  events:    ["founder", "ops_lead", "team_lead", "member"],
+  dashboard: ["founder", "ops_lead", "marketing_lead", "design_lead", "team_lead", "member"],
+  clients:   ["founder", "ops_lead", "marketing_lead", "team_lead"],
+  leads:     ["founder", "ops_lead", "marketing_lead", "team_lead"],
+  projects:  ["founder", "ops_lead", "design_lead", "team_lead", "member"],
+  events:    ["founder", "ops_lead", "marketing_lead", "design_lead", "team_lead", "member"],
   finance:   ["founder", "ops_lead"],
+  reports:   ["founder", "ops_lead"],
   vendors:   ["founder", "ops_lead"],
   staff:     ["founder", "ops_lead"],
   payroll:   ["founder"],
-  library:   ["founder", "ops_lead", "team_lead", "member"],
+  library:   ["founder", "ops_lead", "marketing_lead", "design_lead", "team_lead", "member"],
   targets:   ["founder", "ops_lead"],
-  settings:  ["founder", "ops_lead", "team_lead", "member"],
+  settings:  ["founder", "ops_lead", "marketing_lead", "design_lead", "team_lead", "member"],
 };
 
 const canAccess = (role: Role, page: string) => (PAGE_ACCESS[page] ?? ["founder"]).includes(role);
@@ -2861,14 +3367,16 @@ const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntrie
     .sort((a: any, b: any) => daysUntil(a.due_date) - daysUntil(b.due_date));
 
   const thisMonth = new Date().toISOString().slice(0, 7);
-  const monthRev = revenueEntries.filter((e: any) => e.entry_month?.slice(0,7) === thisMonth).reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const monthCost = costEntries.filter((e: any) => e.entry_month?.slice(0,7) === thisMonth).reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const outstanding = invoices.filter((i: any) => ["sent","overdue"].includes(i.status)).reduce((s: number, i: any) => s + Number(i.total), 0);
+  const monthRev = revenueEntries.filter((e: any) => e.entry_month?.slice(0,7) === thisMonth).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+  const monthCost = costEntries.filter((e: any) => e.entry_month?.slice(0,7) === thisMonth).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+  const outstanding = invoices.filter((i: any) => ["sent","overdue"].includes(i.status)).reduce((s: number, i: any) => s + toNgnEquivalent(Number(i.total), i.fx_rate_to_ngn), 0);
 
   const annualRevTarget = targets.find((t: any) => t.metric === "revenue" && !t.month && !t.pillar && t.year === new Date().getFullYear());
-  const ytdRev = revenueEntries.filter((e: any) => new Date(e.entry_month).getFullYear() === new Date().getFullYear()).reduce((s: number, e: any) => s + Number(e.amount), 0);
+  const ytdRev = revenueEntries.filter((e: any) => new Date(e.entry_month).getFullYear() === new Date().getFullYear()).reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
 
-  // Build chart data from real entries, grouped by month
+  // Build chart data from real entries, grouped by month. Amounts are converted
+  // to their NGN-equivalent (amount * fx_rate_to_ngn) so a mix of currencies
+  // still rolls up into one blended bar per month.
   const buildChartData = () => {
     const map: Record<string, { month: string; Revenue: number; Costs: number }> = {};
     revenueEntries.forEach((e: any) => {
@@ -2876,14 +3384,14 @@ const Dashboard = ({ clients, projects, leads, tasks, revenueEntries, costEntrie
       if (!key) return;
       const label = new Date(e.entry_month).toLocaleDateString("en-GB", { month: "short" });
       if (!map[key]) map[key] = { month: label, Revenue: 0, Costs: 0 };
-      map[key].Revenue += Number(e.amount);
+      map[key].Revenue += toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn);
     });
     costEntries.forEach((e: any) => {
       const key = e.entry_month?.slice(0,7) ?? "";
       if (!key) return;
       const label = new Date(e.entry_month).toLocaleDateString("en-GB", { month: "short" });
       if (!map[key]) map[key] = { month: label, Revenue: 0, Costs: 0 };
-      map[key].Costs += Number(e.amount);
+      map[key].Costs += toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn);
     });
     return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).slice(-6).map(([,v]) => v);
   };
@@ -3240,9 +3748,9 @@ const TASK_CYCLE: Record<string, string> = {
   blocked: "in_progress",
 };
 
-const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p4Ready, onBack, onRefresh, onAddTask, onEditProject, onArchiveProject, onEditTask, onArchiveTask }: {
+const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p4Ready, onBack, onRefresh, onAddTask, onAddExpense, onEditProject, onArchiveProject, onEditTask, onArchiveTask }: {
   project: any; tasks: any[]; clients: any[]; staff: any[]; vendors: any[]; p2Ready: boolean; p4Ready: boolean;
-  onBack: () => void; onRefresh: () => void; onAddTask: () => void;
+  onBack: () => void; onRefresh: () => void; onAddTask: () => void; onAddExpense: () => void;
   onEditProject: (p: any) => void; onArchiveProject: (p: any) => void; onEditTask: (t: any) => void; onArchiveTask: (t: any) => void;
 }) => {
   const [cycling, setCycling] = useState<string | null>(null);
@@ -3355,17 +3863,22 @@ const ProjectDetailPage = ({ project, tasks, clients, staff, vendors, p2Ready, p
           <div><div className="text-[#7070A0] font-mono mb-1">Client</div><div className="text-white">{project.client_id ? (clientMap[project.client_id] ?? "—") : "Internal"}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Project Lead</div><div className="text-white">{project.project_lead_id ? (staffMap[project.project_lead_id] ?? "—") : "—"}</div></div>
           <div><div className="text-[#7070A0] font-mono mb-1">Deadline</div><div className={`font-mono ${d <= 0 ? "text-red-400" : d <= 7 ? "text-amber-400" : "text-white"}`}>{formatDate(project.deadline)}</div></div>
-          <div><div className="text-[#7070A0] font-mono mb-1">Budget</div><div className="font-mono text-white">{project.budget ? formatNaira(project.budget) : "—"}</div></div>
+          <div><div className="text-[#7070A0] font-mono mb-1">Budget</div><div className="font-mono text-white">{project.budget ? formatMoney(project.budget, project.currency) : "—"}</div></div>
         </div>
         {project.notes && <p className="mt-4 text-sm text-[#B0ADCC] leading-relaxed">{project.notes}</p>}
       </div>
 
       {p2Ready && financials && (
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-5">
-          <div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-4">Financials</div>
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest">Financials</div>
+            <button onClick={onAddExpense} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00]/10 text-[#FF4D00] text-xs font-medium hover:bg-[#FF4D00]/20 transition-colors">
+              <Plus size={13} /> Add Expense
+            </button>
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
             <div><div className="text-[#7070A0] font-mono mb-1">Revenue</div><div className="font-mono text-emerald-400">{formatNaira(Number(financials.revenue))}</div></div>
-            <div><div className="text-[#7070A0] font-mono mb-1">Cost</div><div className="font-mono text-red-400">{formatNaira(Number(financials.cost))}</div></div>
+            <div><div className="text-[#7070A0] font-mono mb-1">Expenditure</div><div className="font-mono text-red-400">{formatNaira(Number(financials.cost))}</div></div>
             <div><div className="text-[#7070A0] font-mono mb-1">Margin</div><div className={`font-mono ${Number(financials.margin) >= 0 ? "text-white" : "text-red-400"}`}>{formatNaira(Number(financials.margin))}</div></div>
             <div><div className="text-[#7070A0] font-mono mb-1">Budget Variance</div><div className={`font-mono ${financials.budget_variance == null ? "text-[#7070A0]" : Number(financials.budget_variance) >= 0 ? "text-emerald-400" : "text-red-400"}`}>{financials.budget_variance == null ? "—" : formatNaira(Number(financials.budget_variance))}</div></div>
           </div>
@@ -3702,6 +4215,7 @@ const NewContractModal = ({ clientId, record, onClose, onSaved }: { clientId: st
   const [f, setF] = useState({
     title: record?.title ?? "", pillar: record?.pillar ?? "experiences", contract_type: record?.contract_type ?? "contract",
     value: record?.value ? String(record.value) : "", start_date: record?.start_date ?? "", end_date: record?.end_date ?? "", status: record?.status ?? "draft",
+    currency: record?.currency ?? "NGN",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -3713,6 +4227,7 @@ const NewContractModal = ({ clientId, record, onClose, onSaved }: { clientId: st
       client_id: clientId, title: f.title, pillar: f.pillar as any,
       contract_type: f.contract_type as any, value: f.value ? parseFloat(f.value) : null,
       start_date: f.start_date || null, end_date: f.end_date || null, status: f.status as any,
+      currency: f.currency as any,
     };
     const { error } = record ? await supabase.from("contracts").update(payload).eq("id", record.id) : await supabase.from("contracts").insert(payload);
     setSaving(false);
@@ -3728,7 +4243,10 @@ const NewContractModal = ({ clientId, record, onClose, onSaved }: { clientId: st
           <Field label="Status"><select className={selectCls} value={f.status} onChange={e => set("status", e.target.value)}><option value="draft">Draft</option><option value="sent">Sent</option><option value="signed">Signed</option><option value="expired">Expired</option><option value="terminated">Terminated</option></select></Field>
         </div>
         <Field label="Pillar"><select className={selectCls} value={f.pillar} onChange={e => set("pillar", e.target.value)}>{Object.entries(PILLARS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
-        <Field label="Value (₦)"><input type="number" className={inputCls} placeholder="25000000" value={f.value} onChange={e => set("value", e.target.value)} /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={`Value (${CURRENCY_SYMBOLS[f.currency] ?? f.currency})`}><input type="number" className={inputCls} placeholder="25000000" value={f.value} onChange={e => set("value", e.target.value)} /></Field>
+          <Field label="Currency"><select className={selectCls} value={f.currency} onChange={e => set("currency", e.target.value)}>{Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Start Date"><input type="date" className={inputCls} value={f.start_date} onChange={e => set("start_date", e.target.value)} /></Field>
           <Field label="End Date"><input type="date" className={inputCls} value={f.end_date} onChange={e => set("end_date", e.target.value)} /></Field>
@@ -3742,21 +4260,77 @@ const NewContractModal = ({ clientId, record, onClose, onSaved }: { clientId: st
   );
 };
 
-const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNewContract, onEditClient, onArchiveClient, onEditContract, onArchiveContract }: {
-  client: any; projects: any[]; contracts: any[];
+const ClientDetailPage = ({ client, projects, contracts, events, invoices, revenueEntries, costEntries, clientDocuments, clientNotes, p6Ready, currentUserId, onBack, onRefresh, onNewContract, onEditClient, onArchiveClient, onEditContract, onArchiveContract, onSelectProject, onSelectEvent }: {
+  client: any; projects: any[]; contracts: any[]; events: any[]; invoices: any[]; revenueEntries: any[]; costEntries: any[];
+  clientDocuments: any[]; clientNotes: any[]; p6Ready: boolean; currentUserId: string;
   onBack: () => void; onRefresh: () => void; onNewContract: () => void;
   onEditClient: (c: any) => void; onArchiveClient: (c: any) => void; onEditContract: (c: any) => void; onArchiveContract: (c: any) => void;
+  onSelectProject: (p: any) => void; onSelectEvent: (e: any) => void;
 }) => {
-  const [tab, setTab] = useState<"projects" | "contracts">("projects");
+  const [tab, setTab] = useState<"projects" | "contracts" | "events" | "finance" | "documents" | "notes" | "timeline">("projects");
   const [editStatus, setEditStatus] = useState(false);
+  const [noteBody, setNoteBody] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+  const [docName, setDocName] = useState("");
+  const [docFile, setDocFile] = useState<File | null>(null);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [docErr, setDocErr] = useState("");
+
   const myProjects = projects.filter((p: any) => p.client_id === client.id);
   const myContracts = contracts.filter((c: any) => c.client_id === client.id);
+  const myEvents = events.filter((e: any) => e.client_id === client.id);
+  const myProjectIds = new Set(myProjects.map((p: any) => p.id));
+  const myInvoices = invoices.filter((i: any) => i.client_id === client.id);
+  const myRevenue = revenueEntries.filter((e: any) => e.client_id === client.id || myProjectIds.has(e.project_id));
+  const myExpenditure = costEntries.filter((e: any) => e.client_id === client.id || myProjectIds.has(e.project_id));
+  const myDocuments = clientDocuments.filter((d: any) => d.client_id === client.id);
+  const myNotes = clientNotes.filter((n: any) => n.client_id === client.id);
 
   const setClientStatus = async (status: string) => {
     await supabase.from("clients").update({ status }).eq("id", client.id);
     setEditStatus(false);
     onRefresh();
   };
+
+  const addNote = async (e: React.FormEvent) => {
+    e.preventDefault(); if (!noteBody.trim()) return;
+    setSavingNote(true);
+    await supabase.from("client_notes").insert({ client_id: client.id, author_id: currentUserId || null, body: noteBody.trim() });
+    setNoteBody(""); setSavingNote(false); onRefresh();
+  };
+  const removeNote = async (id: string) => { await supabase.from("client_notes").delete().eq("id", id); onRefresh(); };
+
+  const uploadDocument = async (e: React.FormEvent) => {
+    e.preventDefault(); if (!docFile) return;
+    setUploadingDoc(true); setDocErr("");
+    const path = `${client.id}/${Date.now()}-${docFile.name}`;
+    const { error: upErr } = await supabase.storage.from("client-documents").upload(path, docFile);
+    if (upErr) { setDocErr(upErr.message); setUploadingDoc(false); return; }
+    const { error } = await supabase.from("client_documents").insert({ client_id: client.id, name: docName || docFile.name, file_path: path, uploaded_by: currentUserId || null });
+    setUploadingDoc(false);
+    if (error) setDocErr(error.message); else { setDocName(""); setDocFile(null); onRefresh(); }
+  };
+  const openDocument = async (doc: any) => {
+    const { data, error } = await supabase.storage.from("client-documents").createSignedUrl(doc.file_path, 3600);
+    if (!error && data) window.open(data.signedUrl, "_blank", "noopener");
+  };
+  const removeDocument = async (doc: any) => {
+    if (!window.confirm(`Delete "${doc.name}"? This can't be undone.`)) return;
+    await supabase.storage.from("client-documents").remove([doc.file_path]);
+    await supabase.from("client_documents").delete().eq("id", doc.id);
+    onRefresh();
+  };
+
+  // Timeline: no dedicated audit table — just a client-side merge of everything
+  // already fetched for this client, sorted newest-first.
+  const timelineEvents = [
+    ...myContracts.map((c: any) => ({ date: c.created_at, label: `Contract "${c.title}" created`, icon: "contract" })),
+    ...myProjects.map((p: any) => ({ date: p.created_at, label: `Project "${p.name}" created`, icon: "project" })),
+    ...myEvents.map((e: any) => ({ date: e.created_at, label: `Event "${e.name}" created`, icon: "event" })),
+    ...myInvoices.map((i: any) => ({ date: i.created_at, label: `Invoice ${i.invoice_number} issued`, icon: "invoice" })),
+    ...myNotes.map((n: any) => ({ date: n.created_at, label: `Note added: "${n.body.slice(0, 60)}${n.body.length > 60 ? "…" : ""}"`, icon: "note" })),
+    ...myDocuments.map((d: any) => ({ date: d.created_at, label: `Document "${d.name}" uploaded`, icon: "document" })),
+  ].filter(t => t.date).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   return (
     <div className="space-y-6">
@@ -3802,17 +4376,17 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
       </div>
 
       <div className="bg-[#10101C] border border-white/6 rounded-2xl overflow-hidden">
-        <div className="flex items-center justify-between border-b border-white/6 px-5">
+        <div className="flex items-center justify-between border-b border-white/6 px-5 overflow-x-auto">
           <div className="flex">
-            {(["projects","contracts"] as const).map(t => (
+            {(["projects","contracts","events","finance","documents","notes","timeline"] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}
-                className={`px-4 py-3.5 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${tab === t ? "text-white border-[#FF4D00]" : "text-[#7070A0] border-transparent hover:text-white"}`}>
-                {t} ({t === "projects" ? myProjects.length : myContracts.length})
+                className={`px-4 py-3.5 text-sm font-medium capitalize whitespace-nowrap transition-colors border-b-2 -mb-px ${tab === t ? "text-white border-[#FF4D00]" : "text-[#7070A0] border-transparent hover:text-white"}`}>
+                {t} {t === "projects" ? `(${myProjects.length})` : t === "contracts" ? `(${myContracts.length})` : t === "events" ? `(${myEvents.length})` : t === "documents" ? `(${myDocuments.length})` : t === "notes" ? `(${myNotes.length})` : ""}
               </button>
             ))}
           </div>
           {tab === "contracts" && (
-            <button onClick={onNewContract} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00]/10 text-[#FF4D00] text-xs font-medium hover:bg-[#FF4D00]/20 transition-colors">
+            <button onClick={onNewContract} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00]/10 text-[#FF4D00] text-xs font-medium hover:bg-[#FF4D00]/20 transition-colors flex-shrink-0">
               <Plus size={13} /> New Contract
             </button>
           )}
@@ -3824,7 +4398,7 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
           ) : (
             <div className="divide-y divide-white/4">
               {myProjects.map((p: any) => (
-                <div key={p.id} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-white/2 transition-colors">
+                <div key={p.id} onClick={() => onSelectProject(p)} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-white/2 transition-colors cursor-pointer">
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-white truncate">{p.name}</div>
                     <div className="text-xs text-[#7070A0] mt-0.5 font-mono">{formatDate(p.deadline)}</div>
@@ -3853,7 +4427,7 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
                     <div className="text-sm font-medium text-white truncate">{c.title}</div>
                     <div className="flex items-center gap-2 mt-1">
                       <span className="text-xs font-mono text-[#7070A0] capitalize">{c.contract_type}</span>
-                      {c.value && <span className="text-xs font-mono text-white">{formatNaira(c.value)}</span>}
+                      {c.value && <span className="text-xs font-mono text-white">{formatMoney(c.value, c.currency)}</span>}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
@@ -3861,6 +4435,136 @@ const ClientDetailPage = ({ client, projects, contracts, onBack, onRefresh, onNe
                     <PillarBadge pillar={c.pillar} />
                     <RowActions onEdit={() => onEditContract(c)} onArchive={() => onArchiveContract(c)} archiveLabel={c.title} />
                   </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        {tab === "events" && (
+          myEvents.length === 0 ? (
+            <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No events linked to this client yet. A client can have any number of events over time.</p></div>
+          ) : (
+            <div className="divide-y divide-white/4">
+              {myEvents.map((e: any) => (
+                <div key={e.id} onClick={() => onSelectEvent(e)} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-white/2 transition-colors cursor-pointer">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-white truncate">{e.name}</div>
+                    <div className="text-xs text-[#7070A0] mt-0.5 font-mono">{formatDate(e.event_date)}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <StatusBadge status={e.status} />
+                    <PillarBadge pillar={e.pillar} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        {tab === "finance" && (() => {
+          const revTotal = myRevenue.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+          const expTotal = myExpenditure.reduce((s: number, e: any) => s + toNgnEquivalent(Number(e.amount), e.fx_rate_to_ngn), 0);
+          const invTotal = myInvoices.reduce((s: number, i: any) => s + toNgnEquivalent(Number(i.total), i.fx_rate_to_ngn), 0);
+          return (
+            <div>
+              <div className="grid grid-cols-3 gap-4 p-5 border-b border-white/6 text-xs">
+                <div><div className="text-[#7070A0] font-mono mb-1">Revenue</div><div className="font-mono text-emerald-400">{formatNaira(revTotal)}</div></div>
+                <div><div className="text-[#7070A0] font-mono mb-1">Expenditure</div><div className="font-mono text-red-400">{formatNaira(expTotal)}</div></div>
+                <div><div className="text-[#7070A0] font-mono mb-1">Invoiced</div><div className="font-mono text-white">{formatNaira(invTotal)}</div></div>
+              </div>
+              {myInvoices.length === 0 && myRevenue.length === 0 && myExpenditure.length === 0 ? (
+                <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No invoices, payments, or expenditure recorded for this client yet.</p></div>
+              ) : (
+                <div className="divide-y divide-white/4">
+                  {myInvoices.map((i: any) => (
+                    <div key={`inv-${i.id}`} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                      <div className="text-sm text-white">Invoice {i.invoice_number}</div>
+                      <div className="flex items-center gap-3 flex-shrink-0"><span className="text-xs font-mono text-white">{formatMoney(i.total, i.currency)}</span><StatusBadge status={effectiveInvoiceStatus(i)} /></div>
+                    </div>
+                  ))}
+                  {myRevenue.map((e: any) => (
+                    <div key={`rev-${e.id}`} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                      <div className="text-sm text-white truncate">{e.description}</div>
+                      <span className="text-xs font-mono text-emerald-400 flex-shrink-0">+{formatMoney(e.amount, e.currency)}</span>
+                    </div>
+                  ))}
+                  {myExpenditure.map((e: any) => (
+                    <div key={`exp-${e.id}`} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                      <div className="text-sm text-white truncate">{e.description}</div>
+                      <span className="text-xs font-mono text-red-400 flex-shrink-0">-{formatMoney(e.amount, e.currency)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {tab === "documents" && (
+          !p6Ready ? <div className="p-5"><P6SetupBanner /></div> : (
+            <div>
+              <form onSubmit={uploadDocument} className="flex flex-col sm:flex-row gap-2 p-5 border-b border-white/6">
+                <input className={inputCls} placeholder="Document name (optional)" value={docName} onChange={e => setDocName(e.target.value)} />
+                <input type="file" required className={`${inputCls} sm:max-w-xs`} onChange={e => setDocFile(e.target.files?.[0] ?? null)} />
+                <button type="submit" disabled={uploadingDoc || !docFile} className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex-shrink-0">
+                  {uploadingDoc ? <Spinner /> : <Upload size={14} />}{uploadingDoc ? "Uploading…" : "Upload"}
+                </button>
+              </form>
+              {docErr && <p className="px-5 pt-3 text-sm text-red-400">{docErr}</p>}
+              {myDocuments.length === 0 ? (
+                <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No documents uploaded for this client yet.</p></div>
+              ) : (
+                <div className="divide-y divide-white/4">
+                  {myDocuments.map((d: any) => (
+                    <div key={d.id} className="flex items-center justify-between gap-4 px-5 py-3.5 hover:bg-white/2 transition-colors">
+                      <button onClick={() => openDocument(d)} className="flex items-center gap-2 min-w-0 text-left"><File size={14} className="text-[#FF4D00] flex-shrink-0" /><span className="text-sm text-white truncate hover:text-[#FF4D00] transition-colors">{d.name}</span></button>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <span className="text-xs font-mono text-[#7070A0]">{formatDate(d.created_at)}</span>
+                        <button onClick={() => removeDocument(d)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors"><Trash2 size={14} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        )}
+
+        {tab === "notes" && (
+          !p6Ready ? <div className="p-5"><P6SetupBanner /></div> : (
+            <div>
+              <form onSubmit={addNote} className="flex gap-2 p-5 border-b border-white/6">
+                <input className={inputCls} placeholder="Add a note about this client…" value={noteBody} onChange={e => setNoteBody(e.target.value)} />
+                <button type="submit" disabled={savingNote || !noteBody.trim()} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex-shrink-0">
+                  {savingNote ? <Spinner /> : <Plus size={14} />} Add
+                </button>
+              </form>
+              {myNotes.length === 0 ? (
+                <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">No notes yet.</p></div>
+              ) : (
+                <div className="divide-y divide-white/4">
+                  {myNotes.map((n: any) => (
+                    <div key={n.id} className="flex items-start justify-between gap-4 px-5 py-3.5">
+                      <div className="min-w-0"><p className="text-sm text-[#B0ADCC]">{n.body}</p><div className="text-xs font-mono text-[#7070A0] mt-1">{formatDate(n.created_at)}</div></div>
+                      <button onClick={() => removeNote(n.id)} className="p-1.5 rounded-lg hover:bg-red-400/10 text-[#7070A0] hover:text-red-400 transition-colors flex-shrink-0"><Trash2 size={14} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        )}
+
+        {tab === "timeline" && (
+          timelineEvents.length === 0 ? (
+            <div className="py-10 text-center"><p className="text-sm text-[#7070A0]">Nothing recorded for this client yet.</p></div>
+          ) : (
+            <div className="divide-y divide-white/4">
+              {timelineEvents.map((t, i) => (
+                <div key={i} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                  <span className="text-sm text-[#B0ADCC]">{t.label}</span>
+                  <span className="text-xs font-mono text-[#7070A0] flex-shrink-0">{formatDate(t.date)}</span>
                 </div>
               ))}
             </div>
@@ -3927,7 +4631,7 @@ const EditLeadModal = ({ lead, onClose, onSaved }: { lead: any; onClose: () => v
 
 // ─── Sidebar + Nav ────────────────────────────────────────────────────────────
 
-type Page = "dashboard" | "clients" | "leads" | "projects" | "finance" | "staff" | "payroll" | "events" | "vendors" | "library" | "targets" | "settings";
+type Page = "dashboard" | "clients" | "leads" | "projects" | "finance" | "staff" | "payroll" | "events" | "vendors" | "library" | "targets" | "settings" | "reports";
 
 const NAV_GROUPS = [
   { label: "Operations", items: [
@@ -3940,6 +4644,7 @@ const NAV_GROUPS = [
   { label: "Finance", items: [
     { id: "finance" as Page,   label: "Finance",        icon: DollarSign },
     { id: "vendors" as Page,   label: "Vendors & POs",  icon: Truck },
+    { id: "reports" as Page,   label: "Reports",        icon: Receipt },
   ]},
   { label: "People", items: [
     { id: "staff" as Page,     label: "Staff",          icon: UserSquare2 },
@@ -4019,12 +4724,17 @@ export default function App() {
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
   const [libraryItems, setLibraryItems] = useState<any[]>([]);
+  const [budgetAllocations, setBudgetAllocations] = useState<any[]>([]);
+  const [budgetVsActual, setBudgetVsActual] = useState<any[]>([]);
+  const [clientDocuments, setClientDocuments] = useState<any[]>([]);
+  const [clientNotes, setClientNotes] = useState<any[]>([]);
   const [role, setRole] = useState<Role>("founder");
   const [p2Ready, setP2Ready] = useState(false);
   const [p3Ready, setP3Ready] = useState(false);
   const [p3bReady, setP3bReady] = useState(false);
   const [p4Ready, setP4Ready] = useState(false);
   const [p5Ready, setP5Ready] = useState(false);
+  const [p6Ready, setP6Ready] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [selectedProject, setSelectedProject] = useState<any | null>(null);
@@ -4144,6 +4854,22 @@ export default function App() {
     if (libCheck.error) { setP5Ready(false); }
     else { setP5Ready(true); setLibraryItems(libCheck.data ?? []); }
 
+    // Phase 6 tables (budget tracker · client documents · client notes)
+    const budgetCheck = await supabase.from("budget_allocations").select("*").is("archived_at", null).order("year", { ascending: false }).order("month", { ascending: false });
+    if (budgetCheck.error) { setP6Ready(false); }
+    else {
+      setP6Ready(true);
+      const [bva, docs, notes] = await Promise.all([
+        supabase.from("v_budget_vs_actual").select("*"),
+        supabase.from("client_documents").select("*").order("created_at", { ascending: false }),
+        supabase.from("client_notes").select("*").order("created_at", { ascending: false }),
+      ]);
+      setBudgetAllocations(budgetCheck.data ?? []);
+      setBudgetVsActual(bva.data ?? []);
+      setClientDocuments(docs.data ?? []);
+      setClientNotes(notes.data ?? []);
+    }
+
     setLoadingData(false);
   }, [session, needsSetup]);
 
@@ -4192,7 +4918,7 @@ export default function App() {
     else if (action === "Add Task") setModal("task");
     else if (action === "New Event") { setPage("events"); setSelectedEvent(null); setModal("event"); }
     else if (action === "Log Revenue") { setPage("finance"); setModal("revenue"); }
-    else if (action === "Log Cost") { setPage("finance"); setModal("cost"); }
+    else if (action === "Log Expenditure") { setPage("finance"); setModal("cost"); }
   };
 
   const navTo = (p: Page) => { setPage(p); setSelectedProject(null); setSelectedClient(null); setSelectedInvoice(null); setSelectedEvent(null); setSelectedStaff(null); setMobileOpen(false); };
@@ -4243,6 +4969,14 @@ export default function App() {
             client={clients.find((c: any) => c.id === selectedClient.id) ?? selectedClient}
             projects={projects}
             contracts={contracts}
+            events={events}
+            invoices={invoices}
+            revenueEntries={revenueEntries}
+            costEntries={costEntries}
+            clientDocuments={clientDocuments}
+            clientNotes={clientNotes}
+            p6Ready={p6Ready}
+            currentUserId={session && session !== "loading" ? session.user.id : ""}
             onBack={() => setSelectedClient(null)}
             onRefresh={() => { fetchAll(); }}
             onNewContract={() => setModal("contract")}
@@ -4250,6 +4984,8 @@ export default function App() {
             onArchiveClient={c => { archiveAndRefresh("clients", c); setSelectedClient(null); }}
             onEditContract={c => openEdit("contract", c)}
             onArchiveContract={c => archiveAndRefresh("contracts", c)}
+            onSelectProject={p => { setSelectedProject(p); setPage("projects"); }}
+            onSelectEvent={e => { setSelectedEvent(e); setPage("events"); }}
           />
         );
         return <ClientsPage clients={clients} loading={loadingData} onNew={() => setModal("client")} onRefresh={fetchAll} onSelect={c => setSelectedClient(c)} onEdit={c => openEdit("client", c)} onArchive={c => archiveAndRefresh("clients", c)} />;
@@ -4267,6 +5003,7 @@ export default function App() {
             onBack={() => setSelectedProject(null)}
             onRefresh={fetchAll}
             onAddTask={() => setModal("task-for-project")}
+            onAddExpense={() => setModal("cost-for-project")}
             onEditProject={p => openEdit("project", p)}
             onArchiveProject={p => { archiveAndRefresh("projects", p); setSelectedProject(null); }}
             onEditTask={t => openEdit("task-edit", t)}
@@ -4308,6 +5045,7 @@ export default function App() {
             onBack={() => setSelectedEvent(null)}
             onRefresh={fetchAll}
             onGoLive={() => setLiveEvent(events.find((e: any) => e.id === selectedEvent.id) ?? selectedEvent)}
+            onAddExpense={() => setModal("cost-for-event")}
             onEdit={e => openEdit("event", e)}
             onArchive={e => { archiveAndRefresh("events", e); setSelectedEvent(null); }}
           />
@@ -4327,11 +5065,14 @@ export default function App() {
         return (
           <FinancePage
             p2Ready={p2Ready}
+            p6Ready={p6Ready}
             revenueEntries={revenueEntries}
             costEntries={costEntries}
             invoices={invoices}
             lineItems={lineItems}
             quotations={quotations}
+            budgetAllocations={budgetAllocations}
+            budgetVsActual={budgetVsActual}
             clients={clients}
             projects={projects}
             loading={loadingData}
@@ -4347,6 +5088,8 @@ export default function App() {
             onArchiveInvoice={inv => archiveAndRefresh("invoices", inv)}
             onEditQuotation={q => openEdit("quotation", q)}
             onArchiveQuotation={q => archiveAndRefresh("quotations", q)}
+            onEditBudget={b => openEdit("budget", b)}
+            onArchiveBudget={b => archiveAndRefresh("budget_allocations", b)}
           />
         );
       case "targets":
@@ -4360,6 +5103,17 @@ export default function App() {
             loading={loadingData}
             onEdit={t => openEdit("target", t)}
             onArchive={t => archiveAndRefresh("targets", t)}
+          />
+        );
+      case "reports":
+        return (
+          <ReportsPage
+            p2Ready={p2Ready}
+            clients={clients}
+            projects={projects}
+            revenueEntries={revenueEntries}
+            costEntries={costEntries}
+            invoices={invoices}
           />
         );
       default: return (
@@ -4431,10 +5185,17 @@ export default function App() {
       )}
       {modal === "staff"    && <NewStaffModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "revenue"  && <NewRevenueModal record={editingRecord} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
-      {modal === "cost"     && <NewCostModal record={editingRecord} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "cost"     && <NewCostModal record={editingRecord} projects={projects} clients={clients} events={events} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "cost-for-project" && selectedProject && (
+        <NewCostModal projects={projects} clients={clients} events={events} defaultProjectId={selectedProject.id} onClose={closeModal} onSaved={() => { closeModal(); fetchAll(); }} />
+      )}
+      {modal === "cost-for-event" && selectedEvent && (
+        <NewCostModal projects={projects} clients={clients} events={events} defaultEventId={selectedEvent.id} onClose={closeModal} onSaved={() => { closeModal(); fetchAll(); }} />
+      )}
       {modal === "invoice"  && <NewInvoiceModal record={editingRecord} recordLines={editingRecord ? lineItems.filter((l: any) => l.invoice_id === editingRecord.id) : undefined} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "quotation" && <NewQuotationModal record={editingRecord} clients={clients} projects={projects} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "target"   && <NewTargetModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
+      {modal === "budget"   && <NewBudgetAllocationModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "event"    && <NewEventModal record={editingRecord} clients={clients} projects={projects} staff={staff} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "payroll"  && <NewPayrollModal record={editingRecord} staff={staff} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "vendor"   && <NewVendorModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}

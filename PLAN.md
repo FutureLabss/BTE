@@ -1,5 +1,5 @@
 # BTE Admin Portal — Build Plan
-**Last updated:** 26 July 2026
+**Last updated:** 27 July 2026
 **Founder:** Emediong Umoh
 **Stack:** React 18 + TypeScript · Supabase (Postgres, Auth, RLS) · Tailwind CSS · Figma Make (Vite)
 **Supabase project ID:** `zsgmzknzzlorneacmnzb`
@@ -16,6 +16,7 @@ Auth is live. Emediong is signed in as the sole founder account. Phases 1–4 no
 4. `P3bSetupBanner` — Phase 3b (speakers/guests/attendees), on an event's detail page
 5. `P4SetupBanner` — Phase 4, on the Payroll/Vendors pages
 6. `P4SecurityBanner` — Phase 4b (role-aware RLS), on the Settings page, founder-only — **run this even if you ran Phase 4 a while ago**, it replaces the wide-open policies from the original Phase 4 migration with ones that actually check `profiles.role`
+7. `P6SetupBanner` — Phase 6 (currency · budget tracker · client portfolio), shown on the Finance page's Budget Tracker tab and on a client's Documents/Notes tabs
 
 **What exists in code right now (`src/app/App.tsx`):**
 
@@ -25,21 +26,23 @@ Auth is live. Emediong is signed in as the sole founder account. Phases 1–4 no
 | SetupScreen + per-phase setup banners (migration SQL copy → verify tables) | ✅ Done |
 | Sidebar navigation (role-filtered — hides pages a role can't access) | ✅ Done |
 | Dashboard (live once Phase 2 is set up; sample chart data until then) | ✅ Done |
-| Clients page + Client detail (projects tab, contracts tab + NewContractModal) | ✅ Done |
+| Clients page + Client detail — **Client Portfolio**: projects, contracts, events, finance (invoices/payments/expenditure), documents (upload/download), notes, and a merged timeline | ✅ Done |
 | Leads page (kanban + list, edit modal) | ✅ Done |
-| Projects page + Project detail (tasks with click-to-cycle status, team assignments, vendors engaged, live financials once Phase 2 is set up) | ✅ Done |
+| Projects page + Project detail (tasks with click-to-cycle status, team assignments, vendors engaged, live financials once Phase 2 is set up, "Add Expense" shortcut) | ✅ Done |
 | Staff page + Staff detail (project load, `v_staff_load`) | ✅ Done |
 | Quick-add modal (+ button, ⌘K shortcut) | ✅ Done |
-| Finance page — Revenue / Costs / Invoices / Quotations tabs | ✅ Done |
+| Finance page — Revenue / Expenditure / Invoices / Quotations / Budget Tracker tabs, spending-by-pillar pie chart | ✅ Done |
 | Invoice detail + auto-numbering (`BTE-YYYY-NNNN`) + print-to-PDF | ✅ Done |
 | Quotations — create + one-click "Convert to Invoice" | ✅ Done |
 | Targets page with progress bars | ✅ Done |
-| Events page + Event detail (crew, run-of-show, speakers/guests, attendees + CSV import) | ✅ Done |
+| Events page + Event detail (crew, run-of-show, speakers/guests, attendees + CSV import, "Add Expense" shortcut) | ✅ Done |
 | Event live view — full-screen mobile day-of run-of-show | ✅ Done |
 | Payroll (WHT auto-computed from contract type) | ✅ Done |
 | Vendors & Purchase Orders | ✅ Done |
-| Settings — role management (founder-only) + security migration banner | ✅ Done |
-| CSV export (Clients, Projects, Leads, Finance tabs, Payroll, Vendors) | ✅ Done |
+| Settings — role management (founder + ops_lead + marketing_lead + design_lead + team_lead + member) + security migration banner | ✅ Done |
+| CSV export (Clients, Projects, Leads, Finance tabs, Payroll, Vendors, Reports) | ✅ Done |
+| Reports page — Financial Statement / Project Summary / Client Report, print-to-PDF + CSV export | ✅ Done |
+| Multi-currency (₦/$/£/€, manual FX rate per entry, NGN-equivalent aggregates) | ✅ Done |
 | Knowledge Library (Phase 5) | ⬜ Not started |
 
 **Key files:**
@@ -164,6 +167,38 @@ Auth is live. Emediong is signed in as the sole founder account. Phases 1–4 no
 
 ---
 
+## Phase 6 — Founder feedback round (currency · roles · finance overhaul · client portfolio · reports)
+**Status: code complete — founder actions remain**
+
+Built in response to Emediong's written feedback after his first real session in the dashboard (26 July 2026), covering seven requests in one pass:
+
+### What's built
+- **Multi-currency** — `clients`/`contracts`/`projects`/`events`/`revenue_entries`/`cost_entries`/`invoices`/`quotations` all carry a `currency` (₦/$/£/€, default NGN) and, for the tables that feed aggregates, an `fx_rate_to_ngn` the founder types in for non-NGN entries (no live FX feed is available on this platform — see Known Constraints). `formatMoney()` renders in the record's own currency everywhere; `toNgnEquivalent()` is what the Dashboard, P&L chart, Targets, and `v_project_financials` sum, so a mixed-currency book of business still rolls up into one blended NGN number.
+- **Finer-grained roles** — added `marketing_lead` (dashboard, leads, clients, events, settings) and `design_lead` ("Design & Brand Lead": dashboard, events, projects, settings) alongside the existing `founder`/`ops_lead`/`team_lead`/`member`. `profiles.role` is plain `text` with no CHECK constraint, so this needed no schema change.
+- **Finance module overhaul** — "Cost" renamed to "Expenditure" everywhere in the UI (the underlying `cost_entries` table name is unchanged — renaming a live table with FKs for a label-only ask wasn't worth the migration risk). Expenditure can now attach to a `client_id` and/or `event_id`, not just a `project_id`. Added `donation`/`grant` revenue types. New **Budget Tracker** tab on the Finance page: CRUD over a new `budget_allocations` table (company-wide or per-pillar/category, annual or monthly) compared against actual spend via `v_budget_vs_actual`, with progress bars. New spending-breakdown pie chart (by pillar) on the Expenditure tab.
+- **Project/event-based expenditure** — "Add Expense" button on both the Project detail page and the Event detail page, prefilling `project_id`/`event_id` so expenditure doesn't have to be entered from the Finance tab first.
+- **Client Portfolio** — Client detail expanded from 2 tabs to 7: Projects, Contracts, **Events** (every event linked to this client, proving one client can have many events), **Finance** (invoices + payments + expenditure scoped to the client), **Documents** (upload/download via a new private `client-documents` storage bucket, same pattern as the Knowledge Library's `library-files` bucket), **Notes** (a timestamped note feed, separate from the client's single free-text `notes` field), and **Timeline** (no new table — a client-side merge of contracts/projects/events/invoices/notes/documents `created_at` timestamps for that client, sorted newest-first).
+- **Events already decoupled from clients** — no schema change was needed here; `events.client_id` already supported many events per client. This request is satisfied by the new Events tab in the Client Portfolio making that relationship visible.
+- **Reports page** — new nav item (founder + ops_lead). Three report types — Financial Statement (by pillar, NGN-equivalent, month/quarter/year), Project Summary (revenue/expenditure/margin per active project), Client Report (a chosen client's invoices/revenue/expenditure) — each with "Print / Save as PDF" (same `window.print()` HTML-string pattern as invoice printing) and CSV export.
+
+**Before Phase 6 can be considered founder-signed-off:**
+- Run `MIGRATION_SQL_P6` in the Supabase SQL Editor (adds currency/FX columns, `cost_entries.client_id`/`event_id`, `donation`/`grant` revenue types, `budget_allocations`, `client_documents`, `client_notes`, the `client-documents` storage bucket, and re-points `v_monthly_pnl`/`v_project_financials`/`v_targets_progress` at NGN-equivalents) ← founder action
+- Assign at least one real team member to `marketing_lead` and `design_lead` to confirm the new page-access mapping matches what they actually need day to day
+- Set real budget allocations for at least one pillar/period and confirm the Budget Tracker's spent-vs-allocated math matches expectations
+- Enter one non-NGN invoice or revenue entry with a real FX rate and confirm the Dashboard/P&L totals look right
+
+**Phase 6 acceptance criteria:**
+- [x] Multi-currency entries display in their own currency and roll up correctly in aggregates
+- [x] New roles hide/show pages per the access table above
+- [x] Expenditure can be logged from Finance, from inside a project, and from inside an event
+- [x] Budget Tracker shows allocated vs. actual spend
+- [x] Client Portfolio surfaces events, finance, documents, notes, and a timeline for a client
+- [x] Reports generate and print/export for all three report types
+- [ ] Run Phase 6 migration SQL ← founder action
+- [ ] Real budget allocations entered ← founder action
+
+---
+
 ## Delivered ahead of its original phase
 
 **CSV export** was originally scoped to Phase 5 in this document, but the PRD (§9) calls it non-negotiable independent of phasing — "the company's records must never be locked inside the app." It's done: `exportCSV()` utility + a Download button next to the refresh button on Clients, Projects, Leads, each Finance tab, Payroll, and Vendors.
@@ -198,7 +233,7 @@ Auth is live. Emediong is signed in as the sole founder account. Phases 1–4 no
 - **No service-role key in client code** — all writes go through the Supabase anon key with RLS enforcing access. As of the Phase 4b migration, RLS actually enforces role restrictions on finance/payroll/vendor tables — not just the UI.
 - **Single file architecture** — the entire app lives in `src/app/App.tsx` due to Make platform constraints. Split into logical sections with `// ─── Section ───` comment dividers. Each phase's migration SQL is its own `MIGRATION_SQL_P*` constant with a matching `P*SetupBanner` component — follow that pattern for any future phase.
 - **No `tsconfig.json`** — the project has no dedicated TypeScript config; Vite/esbuild transpiles without type-checking. `utils/supabase/types.ts`'s `Database` generic only covers Phase 1 tables, so Phase 2–4 table calls are effectively untyped. This doesn't affect the running app but means a strict `tsc` run reports many false-positive "never" errors — that's expected given the current setup, not a sign of broken code.
-- **Currency:** Naira only, via `formatNaira()`. Never use `toFixed(2)` directly anywhere else.
+- **Currency:** as of Phase 6, records can carry ₦/$/£/€ via `formatMoney(amount, currency)`; `formatNaira()` still exists and is used for values already known to be pure NGN or NGN-equivalent (aggregates). No live FX feed is available on this platform (same edge-function-reset constraint as above), so non-NGN entries need a manually-typed `fx_rate_to_ngn` — same pattern as the manually-configured WHT rates. Never use `toFixed(2)` directly anywhere else.
 - **Dates:** via `formatDate()` only. Display as `DD Month YYYY`.
 - **Concurrent editing:** more than one Claude Code session/window has been observed editing `App.tsx` at the same time with no commit boundary between them. Commit frequently to create recovery points, and check `git status`/`git diff` before assuming you know the current state of the file.
 

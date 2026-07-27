@@ -373,6 +373,10 @@ CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER LANGUAGE plpgsql AS 
 
 CREATE TABLE IF NOT EXISTS staff (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, role_title text, team text, pillar pillar, contract_type staff_contract_type_enum NOT NULL DEFAULT 'core_staff', start_date date, nda_signed boolean NOT NULL DEFAULT false, capacity_pct int CHECK (capacity_pct BETWEEN 0 AND 200), active boolean NOT NULL DEFAULT true, notes text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+-- Without this, the seed INSERT's "ON CONFLICT DO NOTHING" below has no unique
+-- constraint to catch on, so re-running this migration silently double-seeds
+-- every staff member instead of no-op'ing.
+DO $$ BEGIN ALTER TABLE staff ADD CONSTRAINT staff_name_unique UNIQUE (name); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DROP TRIGGER IF EXISTS staff_updated_at ON staff; CREATE TRIGGER staff_updated_at BEFORE UPDATE ON staff FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS clients (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, client_type client_type_enum NOT NULL DEFAULT 'corporate', pillar pillar NOT NULL, point_of_contact text, contact_email text, contact_phone text, billing_details jsonb, status client_status_enum NOT NULL DEFAULT 'prospect', notes text, archived_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
@@ -826,7 +830,12 @@ DO $$ BEGIN CREATE POLICY "auth_all_cost_entries" ON cost_entries FOR ALL TO aut
 DO $$ BEGIN CREATE POLICY "auth_all_quotations" ON quotations FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE POLICY "auth_all_targets" ON targets FOR ALL TO authenticated USING (true) WITH CHECK (true); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE OR REPLACE VIEW v_monthly_pnl AS
+-- Dropped before recreated: Phase 6 redefines these same three views with
+-- currency-converted (fx_rate_to_ngn-multiplied) columns, and CREATE OR REPLACE
+-- VIEW can't change a column's output type — only DROP+CREATE can, regardless
+-- of which of Phase 2 / Phase 6 happens to run second.
+DROP VIEW IF EXISTS v_monthly_pnl;
+CREATE VIEW v_monthly_pnl AS
 SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, SUM(amount) as revenue, 0::numeric as costs FROM revenue_entries GROUP BY 1,2,3
 UNION ALL
 SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, 0::numeric as revenue, SUM(amount) as costs FROM cost_entries GROUP BY 1,2,3;
@@ -834,7 +843,8 @@ SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_mon
 CREATE OR REPLACE VIEW v_receivables AS
 SELECT i.id, i.invoice_number, i.client_id, c.name as client_name, i.issued_date, i.due_date, i.total, i.status, CURRENT_DATE - i.due_date as days_overdue FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.status IN ('sent','overdue') AND i.archived_at IS NULL ORDER BY i.due_date;
 
-CREATE OR REPLACE VIEW v_project_financials AS
+DROP VIEW IF EXISTS v_project_financials;
+CREATE VIEW v_project_financials AS
 SELECT p.id as project_id, p.name as project_name, p.budget,
   COALESCE((SELECT SUM(amount) FROM revenue_entries WHERE project_id = p.id), 0) as revenue,
   COALESCE((SELECT SUM(amount) FROM cost_entries WHERE project_id = p.id), 0) as cost,
@@ -843,7 +853,8 @@ SELECT p.id as project_id, p.name as project_name, p.budget,
   p.budget - COALESCE((SELECT SUM(amount) FROM cost_entries WHERE project_id = p.id), 0) as budget_variance
 FROM projects p WHERE p.archived_at IS NULL;
 
-CREATE OR REPLACE VIEW v_targets_progress AS
+DROP VIEW IF EXISTS v_targets_progress;
+CREATE VIEW v_targets_progress AS
 SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='revenue'
 UNION ALL
 SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) - COALESCE((SELECT SUM(ce.amount) FROM cost_entries ce WHERE (t.pillar IS NULL OR ce.pillar=t.pillar) AND EXTRACT(YEAR FROM ce.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM ce.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='profit';`;
@@ -2825,7 +2836,8 @@ CREATE TABLE IF NOT EXISTS client_documents (id uuid PRIMARY KEY DEFAULT gen_ran
 
 CREATE TABLE IF NOT EXISTS client_notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), client_id uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE, author_id uuid REFERENCES profiles(id) ON DELETE SET NULL, body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 
-CREATE OR REPLACE VIEW v_budget_vs_actual AS
+DROP VIEW IF EXISTS v_budget_vs_actual;
+CREATE VIEW v_budget_vs_actual AS
 SELECT b.id, b.year, b.month, b.pillar, b.category, b.allocated_amount * b.fx_rate_to_ngn as allocated_ngn,
   COALESCE((SELECT SUM(c.amount * c.fx_rate_to_ngn) FROM cost_entries c
     WHERE c.archived_at IS NULL
@@ -2839,12 +2851,16 @@ FROM budget_allocations b WHERE b.archived_at IS NULL;
 -- Re-point the Phase 2 aggregate views at NGN-equivalents (amount * fx_rate_to_ngn)
 -- now that revenue/cost entries can carry a non-NGN currency, so a mixed-currency
 -- book of business still rolls up into one blended number everywhere it already did.
-CREATE OR REPLACE VIEW v_monthly_pnl AS
+-- Dropped first: these change the output column type (numeric(14,2) -> numeric via
+-- the multiplication), which CREATE OR REPLACE VIEW can never do.
+DROP VIEW IF EXISTS v_monthly_pnl;
+CREATE VIEW v_monthly_pnl AS
 SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, SUM(amount * fx_rate_to_ngn) as revenue, 0::numeric as costs FROM revenue_entries GROUP BY 1,2,3
 UNION ALL
 SELECT to_char(entry_month,'YYYY-MM') as month_key, date_trunc('month',entry_month::timestamptz)::date as month, pillar, 0::numeric as revenue, SUM(amount * fx_rate_to_ngn) as costs FROM cost_entries GROUP BY 1,2,3;
 
-CREATE OR REPLACE VIEW v_project_financials AS
+DROP VIEW IF EXISTS v_project_financials;
+CREATE VIEW v_project_financials AS
 SELECT p.id as project_id, p.name as project_name, p.budget * p.fx_rate_to_ngn as budget,
   COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM revenue_entries WHERE project_id = p.id), 0) as revenue,
   COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM cost_entries WHERE project_id = p.id), 0) as cost,
@@ -2853,7 +2869,8 @@ SELECT p.id as project_id, p.name as project_name, p.budget * p.fx_rate_to_ngn a
   (p.budget * p.fx_rate_to_ngn) - COALESCE((SELECT SUM(amount * fx_rate_to_ngn) FROM cost_entries WHERE project_id = p.id), 0) as budget_variance
 FROM projects p WHERE p.archived_at IS NULL;
 
-CREATE OR REPLACE VIEW v_targets_progress AS
+DROP VIEW IF EXISTS v_targets_progress;
+CREATE VIEW v_targets_progress AS
 SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount * re.fx_rate_to_ngn) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='revenue'
 UNION ALL
 SELECT t.id, t.year, t.month, t.pillar, t.metric, t.target_value, COALESCE((SELECT SUM(re.amount * re.fx_rate_to_ngn) FROM revenue_entries re WHERE (t.pillar IS NULL OR re.pillar=t.pillar) AND EXTRACT(YEAR FROM re.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM re.entry_month)=t.month)),0) - COALESCE((SELECT SUM(ce.amount * ce.fx_rate_to_ngn) FROM cost_entries ce WHERE (t.pillar IS NULL OR ce.pillar=t.pillar) AND EXTRACT(YEAR FROM ce.entry_month)=t.year AND (t.month IS NULL OR EXTRACT(MONTH FROM ce.entry_month)=t.month)),0) as actual_value FROM targets t WHERE t.metric='profit';

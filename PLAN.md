@@ -199,6 +199,35 @@ Built in response to Emediong's written feedback after his first real session in
 
 ---
 
+## Phase 7 — Access control hardening (remove self-signup · gate project visibility)
+**Status: code complete — founder actions remain**
+
+Built in response to the founder testing the live app: signing up through the public login page handed out an account with no gate, and any signed-in team member could see every project regardless of whether it was theirs — `Role`/`PAGE_ACCESS` only ever hid whole pages, it was never row-level.
+
+### What's built
+- **Self-signup removed** — `LoginScreen` no longer has a "Create account" path at all (no `supabase.auth.signUp` call anywhere in the client). Only sign-in and password reset remain.
+- **In-app email invites** — Settings → Team & Roles has an "Invite by email" form (email + initial role) that calls a new founder-only Edge Function route, `POST /make-server-ecee925a/invite-user` (`supabase/functions/server/index.tsx`). The route verifies the caller's JWT and checks their `profiles.role === 'founder'` before doing anything, then uses the service-role key to call `supabase.auth.admin.inviteUserByEmail()` (Supabase's built-in invite flow — no separate email provider needed) and pre-seeds the new person's `profiles` row with the role the founder picked, so they land with correct access on their very first login. The Supabase Auth dashboard link is kept alongside it as a manual fallback.
+- **Project visibility gated by ownership/assignment** — added the missing link between `profiles` (login accounts) and `staff` (the people directory `project_lead_id`/`project_assignments` already pointed at): `profiles.staff_id`, set per team member from Settings' "Linked Staff" dropdown next to their role. RLS on `projects`, `tasks`, and `project_assignments` (previously still on the original Phase 1 "any authenticated user" policy) now restricts rows to: `founder`/`ops_lead` (unrestricted, per the founder's own "head of ops should see it all" call), or the project's lead, or someone assigned to it. `NewProjectModal` auto-defaults a new project's lead to the creator's own linked staff record when they aren't founder/ops_lead, so creating a project never silently produces one the creator immediately loses visibility into.
+- Reused `bte_role()` (not `current_role()` — that name collides with a reserved Postgres keyword and silently fails to even parse; this was already discovered and fixed for the Phase 4b/6 migrations) for the new RLS policies, plus a matching `bte_staff_id()` helper.
+
+**Before Phase 7 can be considered founder-signed-off:**
+- Run `MIGRATION_SQL_P7` in the Supabase SQL Editor ← founder action
+- **Deploy the updated Edge Function** (`supabase functions deploy make-server-ecee925a`) — unlike the SQL migrations, this can't be pasted into the SQL Editor; it needs the Supabase CLI (or the Dashboard's function editor) since the invite button calls this route directly ← founder action, required before "Invite by email" will work
+- Link each existing team member to their staff record in Settings, and set a project lead or assignment on every existing project that a non-founder/ops_lead person still needs to see — **any project with no lead and no assignments becomes invisible to everyone except founder/ops_lead the moment this migration runs** ← founder action, do this in the same sitting as running the migration
+- Test with a second, restricted-role account that they only see their own projects, and that `ops_lead` still sees everything
+- Send a real invite to confirm the email actually arrives (Supabase's default email sending is rate-limited; if invites need to go out at any real volume, configure custom SMTP under Supabase Auth settings)
+
+**Phase 7 acceptance criteria:**
+- [x] No public sign-up path exists in the app
+- [x] Founder can invite a team member by email from within the app
+- [x] Projects/tasks are restricted by RLS to lead/assignee, with founder/ops_lead unrestricted
+- [x] Creating a project as a restricted role keeps that project visible to its creator
+- [ ] Run Phase 7 migration SQL ← founder action
+- [ ] Edge Function deployed ← founder action
+- [ ] Existing projects re-assigned a lead/team so nothing goes dark for the people who need it ← founder action
+
+---
+
 ## Delivered ahead of its original phase
 
 **CSV export** was originally scoped to Phase 5 in this document, but the PRD (§9) calls it non-negotiable independent of phasing — "the company's records must never be locked inside the app." It's done: `exportCSV()` utility + a Download button next to the refresh button on Clients, Projects, Leads, each Finance tab, Payroll, and Vendors.
@@ -229,7 +258,7 @@ Built in response to Emediong's written feedback after his first real session in
 
 ## Known constraints
 
-- **Edge function resets:** Figma Make reverts `supabase/functions/server/index.tsx` to a stub on every save. All backend logic must go in the React app or directly in Postgres (triggers, functions, views). No pg_cron-based automation is realistic to set up this way — anything time-based needs a client-side computed workaround instead (see the invoice overdue handling above).
+- **Edge function resets:** Figma Make reverts `supabase/functions/server/index.tsx` to a stub on every save. All backend logic must go in the React app or directly in Postgres (triggers, functions, views). No pg_cron-based automation is realistic to set up this way — anything time-based needs a client-side computed workaround instead (see the invoice overdue handling above). Two exceptions now live in that file despite this risk — the Phase 5b overdue-check cron target and the Phase 7 `invite-user` route — both need real service-role privileges that can't run client-side, so they're deployed directly via the Supabase CLI/Dashboard rather than through a Figma Make save. If the founder ever edits this project again in Figma Make and saves, both need to be redeployed afterward.
 - **No service-role key in client code** — all writes go through the Supabase anon key with RLS enforcing access. As of the Phase 4b migration, RLS actually enforces role restrictions on finance/payroll/vendor tables — not just the UI.
 - **Single file architecture** — the entire app lives in `src/app/App.tsx` due to Make platform constraints. Split into logical sections with `// ─── Section ───` comment dividers. Each phase's migration SQL is its own `MIGRATION_SQL_P*` constant with a matching `P*SetupBanner` component — follow that pattern for any future phase.
 - **No `tsconfig.json`** — the project has no dedicated TypeScript config; Vite/esbuild transpiles without type-checking. `utils/supabase/types.ts`'s `Database` generic only covers Phase 1 tables, so Phase 2–4 table calls are effectively untyped. This doesn't affect the running app but means a strict `tsc` run reports many false-positive "never" errors — that's expected given the current setup, not a sign of broken code.

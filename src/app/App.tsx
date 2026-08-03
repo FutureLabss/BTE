@@ -213,13 +213,12 @@ const CurrencyFXFields = ({ currency, fxRate, onCurrency, onFxRate }: { currency
 // ─── Login / Sign-up Screen ───────────────────────────────────────────────────
 
 const LoginScreen = () => {
-  const [mode, setMode] = useState<"signin" | "signup" | "reset">("signin");
+  const [mode, setMode] = useState<"signin" | "reset">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [signedUp, setSignedUp] = useState(false);
   const [resetSent, setResetSent] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
@@ -237,16 +236,9 @@ const LoginScreen = () => {
       return;
     }
 
-    if (mode === "signup") {
-      const { data, error: err } = await supabase.auth.signUp({ email, password });
-      setLoading(false);
-      if (err) { setError(err.message); return; }
-      if (!data.session) setSignedUp(true);
-    } else {
-      const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-      setLoading(false);
-      if (err) setError("Wrong email or password.");
-    }
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (err) setError("Wrong email or password.");
   };
 
   const logo = (
@@ -264,19 +256,7 @@ const LoginScreen = () => {
       <div className="w-full max-w-sm">
         {logo}
 
-        {signedUp ? (
-          <div className="text-center">
-            <div className="w-14 h-14 rounded-full bg-emerald-400/10 border border-emerald-400/20 flex items-center justify-center mx-auto mb-4">
-              <CheckCheck size={24} className="text-emerald-400" />
-            </div>
-            <h2 className="text-lg font-bold text-white mb-2" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Account created</h2>
-            <p className="text-sm text-[#7070A0] mb-6">Check your email to confirm, then sign in.</p>
-            <button onClick={() => { setSignedUp(false); setMode("signin"); setPassword(""); }}
-              className="w-full py-3 rounded-xl bg-[#FF4D00] text-white font-medium text-sm hover:bg-[#E04400] transition-colors">
-              Go to sign in →
-            </button>
-          </div>
-        ) : resetSent ? (
+        {resetSent ? (
           <div className="text-center">
             <div className="w-14 h-14 rounded-full bg-blue-400/10 border border-blue-400/20 flex items-center justify-center mx-auto mb-4">
               <Mail size={24} className="text-blue-400" />
@@ -291,13 +271,11 @@ const LoginScreen = () => {
         ) : (
           <>
             <h1 className="text-2xl font-bold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>
-              {mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Reset password"}
+              {mode === "signin" ? "Sign in" : "Reset password"}
             </h1>
             <p className="text-sm text-[#7070A0] mb-8">
               {mode === "signin"
                 ? "Welcome back to the BTE Admin Portal."
-                : mode === "signup"
-                ? "Founder account setup. Team joins by invitation later."
                 : "Enter your email and we'll send a reset link."}
             </p>
 
@@ -311,17 +289,15 @@ const LoginScreen = () => {
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-mono text-[#7070A0] uppercase tracking-wider">Password</label>
-                    {mode === "signin" && (
-                      <button type="button" onClick={() => { setMode("reset"); setError(""); }}
-                        className="text-xs text-[#7070A0] hover:text-[#FF4D00] transition-colors">
-                        Forgot password?
-                      </button>
-                    )}
+                    <button type="button" onClick={() => { setMode("reset"); setError(""); }}
+                      className="text-xs text-[#7070A0] hover:text-[#FF4D00] transition-colors">
+                      Forgot password?
+                    </button>
                   </div>
                   <div className="relative">
                     <input type={showPw ? "text" : "password"} required minLength={8}
                       value={password} onChange={e => setPassword(e.target.value)}
-                      placeholder={mode === "signup" ? "Min. 8 characters" : "Your password"}
+                      placeholder="Your password"
                       className={`${inputCls} pr-10`} />
                     <button type="button" onClick={() => setShowPw(v => !v)}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-[#7070A0] hover:text-white transition-colors">
@@ -334,13 +310,13 @@ const LoginScreen = () => {
               <button type="submit" disabled={loading}
                 className="w-full py-3 rounded-xl bg-[#FF4D00] text-white font-medium text-sm hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2">
                 {loading && <Spinner />}
-                {loading ? "Please wait…" : mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Send reset link"}
+                {loading ? "Please wait…" : mode === "signin" ? "Sign in" : "Send reset link"}
               </button>
             </form>
 
             <p className="mt-6 text-center text-sm text-[#7070A0]">
               {mode === "signin" ? (
-                <>No account? <button onClick={() => { setMode("signup"); setError(""); }} className="text-white hover:text-[#FF4D00] transition-colors font-medium">Create one</button></>
+                <>Don't have an account? Ask your founder/admin for access.</>
               ) : (
                 <>Back to <button onClick={() => { setMode("signin"); setError(""); }} className="text-white hover:text-[#FF4D00] transition-colors font-medium">sign in</button></>
               )}
@@ -649,10 +625,14 @@ const NewLeadModal = ({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   );
 };
 
-const NewProjectModal = ({ record, onClose, onSaved, clients, staff }: { record?: any; onClose: () => void; onSaved: () => void; clients: any[]; staff: any[] }) => {
+const NewProjectModal = ({ record, onClose, onSaved, clients, staff, role, ownStaffId }: { record?: any; onClose: () => void; onSaved: () => void; clients: any[]; staff: any[]; role: Role; ownStaffId?: string | null }) => {
+  // Restricted roles lose visibility into a project the instant they create it
+  // unless they're its lead or an assignee (Phase 7 RLS) — default to themselves
+  // so "create a project" never silently produces a project they can't see again.
+  const defaultLead = record ? record.project_lead_id ?? "" : (role === "founder" || role === "ops_lead" ? "" : ownStaffId ?? "");
   const [f, setF] = useState({
     name: record?.name ?? "", client_id: record?.client_id ?? "", pillar: record?.pillar ?? "experiences",
-    project_lead_id: record?.project_lead_id ?? "", deadline: record?.deadline ?? "", budget: record?.budget ? String(record.budget) : "",
+    project_lead_id: defaultLead, deadline: record?.deadline ?? "", budget: record?.budget ? String(record.budget) : "",
     status: record?.status ?? "not_started", is_event: record ? String(!!record.is_event) : "false",
     currency: record?.currency ?? "NGN", fx_rate_to_ngn: record?.fx_rate_to_ngn != null ? String(record.fx_rate_to_ngn) : "1",
   });
@@ -2913,6 +2893,66 @@ const P6SetupBanner = () => {
   );
 };
 
+// ─── Phase 7 Migration SQL (Access Control Hardening) ──────────────────────────
+// The founder found that any signed-in team member could see every project
+// regardless of ownership — Role/PAGE_ACCESS only ever hid whole pages, never
+// rows. This links each login (`profiles`) to a directory entry (`staff`) —
+// the missing piece needed to know "which projects are this person's" — and
+// gates `projects`/`tasks`/`project_assignments` by that link at the RLS
+// layer (founder + ops_lead still see everything).
+const MIGRATION_SQL_P7 = `-- BTE Admin Portal — Phase 7 Migration (Access Control Hardening)
+-- Run AFTER Phase 4b (reuses bte_role()). Paste into: Supabase Dashboard → SQL Editor → Run
+
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES staff(id) ON DELETE SET NULL;
+
+CREATE OR REPLACE FUNCTION bte_role() RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT role FROM profiles WHERE id = auth.uid();
+$$;
+
+CREATE OR REPLACE FUNCTION bte_staff_id() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT staff_id FROM profiles WHERE id = auth.uid();
+$$;
+
+DROP POLICY IF EXISTS "auth_all_projects" ON projects;
+DROP POLICY IF EXISTS "role_projects" ON projects;
+CREATE POLICY "role_projects" ON projects FOR ALL TO authenticated
+  USING (bte_role() IN ('founder','ops_lead') OR project_lead_id = bte_staff_id() OR id IN (SELECT project_id FROM project_assignments WHERE staff_id = bte_staff_id()))
+  WITH CHECK (bte_role() IN ('founder','ops_lead') OR project_lead_id = bte_staff_id() OR id IN (SELECT project_id FROM project_assignments WHERE staff_id = bte_staff_id()));
+
+DROP POLICY IF EXISTS "auth_all_tasks" ON tasks;
+DROP POLICY IF EXISTS "role_tasks" ON tasks;
+CREATE POLICY "role_tasks" ON tasks FOR ALL TO authenticated
+  USING (bte_role() IN ('founder','ops_lead') OR assignee_id = bte_staff_id() OR project_id IN (SELECT id FROM projects))
+  WITH CHECK (bte_role() IN ('founder','ops_lead') OR assignee_id = bte_staff_id() OR project_id IN (SELECT id FROM projects));
+
+DROP POLICY IF EXISTS "auth_all_project_assignments" ON project_assignments;
+DROP POLICY IF EXISTS "role_project_assignments" ON project_assignments;
+CREATE POLICY "role_project_assignments" ON project_assignments FOR ALL TO authenticated
+  USING (bte_role() IN ('founder','ops_lead') OR staff_id = bte_staff_id() OR project_id IN (SELECT id FROM projects))
+  WITH CHECK (bte_role() IN ('founder','ops_lead') OR staff_id = bte_staff_id() OR project_id IN (SELECT id FROM projects));`;
+
+const P7SetupBanner = () => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(MIGRATION_SQL_P7); setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  return (
+    <div className="bg-[#10101C] border border-red-400/20 rounded-2xl p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={18} className="text-red-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <h3 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Security: gate project visibility by ownership</h3>
+          <p className="text-sm text-[#7070A0]">Today, any signed-in team member can see every project regardless of whether it's theirs. Run this once in your <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/sql/new" target="_blank" rel="noreferrer" className="text-[#FF4D00] underline">Supabase SQL Editor</a> to restrict projects/tasks to their lead, assigned team, or founder/ops lead — then link each team member to their staff record below.</p>
+        </div>
+      </div>
+      <div className="relative">
+        <pre className="text-xs font-mono text-[#7070A0] bg-black/30 rounded-xl p-4 overflow-auto max-h-48 whitespace-pre-wrap break-all">{MIGRATION_SQL_P7}</pre>
+        <button onClick={copy} className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D00] text-white text-xs font-medium hover:bg-[#E04400] transition-colors">
+          {copied ? <CheckCheck size={13} /> : <Database size={13} />}{copied ? "Copied!" : "Copy SQL"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ─── RBAC (UI-level) ──────────────────────────────────────────────────────────
 
 type Role = "founder" | "ops_lead" | "marketing_lead" | "design_lead" | "team_lead" | "member";
@@ -3297,10 +3337,50 @@ const VendorsPage = ({ p4Ready, role, vendors, purchaseOrders, projects, loading
 
 // ─── Settings / Team (RBAC management) ──────────────────────────────────────────
 
-const SettingsPage = ({ role, profiles, currentUserId, p4Ready, p5Ready, onRefresh }: {
-  role: Role; profiles: any[]; currentUserId: string; p4Ready: boolean; p5Ready: boolean; onRefresh: () => void;
+// Sends the invite through the `invite-user` Edge Function route (service-role
+// only, so it can't run client-side) rather than supabase.auth.signUp — this is
+// how a founder-only "add a person" action works now that self-signup is gone.
+// Requires that route to be deployed (`supabase functions deploy make-server-ecee925a`);
+// until then this fails and the founder can still fall back to the Supabase
+// Auth dashboard link next to it.
+const InviteTeamMemberForm = ({ onInvited }: { onInvited: () => void }) => {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<Role>("member");
+  const [sending, setSending] = useState(false);
+  const [err, setErr] = useState("");
+  const [sent, setSent] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault(); setSending(true); setErr(""); setSent("");
+    const { data, error } = await supabase.functions.invoke("make-server-ecee925a/invite-user", {
+      body: { email, role, redirectTo: window.location.origin },
+    });
+    setSending(false);
+    const apiError = (data as any)?.error;
+    if (error || apiError) { setErr(apiError || error?.message || "Failed to send invite."); return; }
+    setSent(email); setEmail(""); onInvited();
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-3 items-end">
+        <Field label="Invite by email"><input required type="email" className={inputCls} placeholder="name@breaktheeyes.com" value={email} onChange={e => { setEmail(e.target.value); setErr(""); setSent(""); }} /></Field>
+        <Field label="Role"><select className={selectCls} value={role} onChange={e => setRole(e.target.value as Role)}>{(Object.keys(ROLE_LABELS) as Role[]).map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}</select></Field>
+        <button type="submit" disabled={sending} className="px-4 py-2.5 rounded-xl bg-[#FF4D00] text-white text-sm font-medium hover:bg-[#E04400] disabled:opacity-60 transition-colors flex items-center justify-center gap-2 whitespace-nowrap">
+          {sending ? <Spinner /> : <Mail size={15} />}{sending ? "Sending…" : "Send Invite"}
+        </button>
+      </div>
+      {err && <p className="text-sm text-red-400">{err}</p>}
+      {sent && <p className="text-sm text-emerald-400">Invite emailed to {sent} — they'll appear in the list below once they set a password and sign in.</p>}
+    </form>
+  );
+};
+
+const SettingsPage = ({ role, profiles, staff, currentUserId, p4Ready, p5Ready, p7Ready, onRefresh }: {
+  role: Role; profiles: any[]; staff: any[]; currentUserId: string; p4Ready: boolean; p5Ready: boolean; p7Ready: boolean; onRefresh: () => void;
 }) => {
   const changeRole = async (id: string, newRole: string) => { await supabase.from("profiles").update({ role: newRole }).eq("id", id); onRefresh(); };
+  const changeStaffLink = async (id: string, staffId: string) => { await supabase.from("profiles").update({ staff_id: staffId || null }).eq("id", id); onRefresh(); };
   return (
     <div className="space-y-6">
       <div><div className="text-xs font-mono text-[#7070A0] uppercase tracking-widest mb-1">Settings</div><h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Settings</h1></div>
@@ -3313,24 +3393,41 @@ const SettingsPage = ({ role, profiles, currentUserId, p4Ready, p5Ready, onRefre
 
       {role === "founder" && p4Ready && <P4SecurityBanner />}
 
+      {role === "founder" && !p7Ready && <P7SetupBanner />}
+
       {role === "founder" && p5Ready && <P5bInfoBanner />}
 
       {role === "founder" && (
         <div className="bg-[#10101C] border border-white/6 rounded-2xl p-6">
-          <h2 className="text-sm font-semibold text-white mb-1" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Team & Roles</h2>
-          <p className="text-sm text-[#7070A0] mb-4">Team members appear here after their first sign-in. Assign each person a role to control what they can access.</p>
+          <div className="flex items-start justify-between gap-4 flex-wrap mb-1">
+            <h2 className="text-sm font-semibold text-white" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>Team & Roles</h2>
+            <a href="https://supabase.com/dashboard/project/zsgmzknzzlorneacmnzb/auth/users" target="_blank" rel="noreferrer" className="text-xs text-[#7070A0] hover:text-[#FF4D00] underline">Or add manually in Supabase Auth →</a>
+          </div>
+          <p className="text-sm text-[#7070A0] mb-4">Invite a team member below and they'll get an email to set their password — there's no public sign-up anymore, so this (or the manual link above) is the only way in.</p>
+
+          <InviteTeamMemberForm onInvited={onRefresh} />
+
+          <div className="h-px bg-white/6 my-5" />
+
+          <p className="text-sm text-[#7070A0] mb-4">Assign each person a role to control what pages they can access{p7Ready ? ", and link them to their staff record so they only see the projects they lead or are assigned to (unrestricted for Founder/Ops Lead)." : "."}</p>
           {!p4Ready ? <p className="text-sm text-amber-400">Run the Phase 4 migration to enable role management.</p>
           : profiles.length === 0 ? <p className="text-sm text-[#7070A0]">No team members yet.</p>
           : (
             <div className="space-y-2">
               {profiles.map((p: any) => (
-                <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6">
+                <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/6 flex-wrap">
                   <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#FF4D00] to-[#A855F7] flex items-center justify-center text-white font-bold text-xs flex-shrink-0">{(p.name || p.email || "?").slice(0, 2).toUpperCase()}</div>
                   <div className="flex-1 min-w-0"><div className="text-sm text-white truncate">{p.name || p.email || "Unknown"}</div><div className="text-xs font-mono text-[#7070A0] truncate">{p.email}</div></div>
                   {p.id === currentUserId ? <span className="text-xs font-mono text-[#7070A0]">You</span>
                   : <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-1.5 text-white" defaultValue={p.role} onChange={e => changeRole(p.id, e.target.value)}>
                       {(Object.keys(ROLE_LABELS) as Role[]).map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                     </select>}
+                  {p7Ready && p.id !== currentUserId && (
+                    <select className="text-xs bg-[#1A1A2E] border border-white/10 rounded-lg px-3 py-1.5 text-white" defaultValue={p.staff_id ?? ""} onChange={e => changeStaffLink(p.id, e.target.value)}>
+                      <option value="">— No linked staff record —</option>
+                      {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  )}
                 </div>
               ))}
             </div>
@@ -4752,6 +4849,9 @@ export default function App() {
   const [p4Ready, setP4Ready] = useState(false);
   const [p5Ready, setP5Ready] = useState(false);
   const [p6Ready, setP6Ready] = useState(false);
+  const [p7Ready, setP7Ready] = useState(false);
+  const currentUserId = session && session !== "loading" ? session.user.id : "";
+  const ownStaffId = profiles.find((p: any) => p.id === currentUserId)?.staff_id ?? null;
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [selectedProject, setSelectedProject] = useState<any | null>(null);
@@ -4886,6 +4986,11 @@ export default function App() {
       setClientDocuments(docs.data ?? []);
       setClientNotes(notes.data ?? []);
     }
+
+    // Phase 7 (profiles.staff_id link + row-level RLS) — no new table to probe,
+    // so check for the column itself; a missing-column error means not set up yet.
+    const staffLinkCheck = await supabase.from("profiles").select("staff_id").limit(1);
+    setP7Ready(!staffLinkCheck.error);
 
     setLoadingData(false);
   }, [session, needsSetup]);
@@ -5050,7 +5155,7 @@ export default function App() {
           </div>
         );
         return <LibraryPage items={libraryItems} loading={loadingData} onNew={() => setModal("library")} onRefresh={fetchAll} />;
-      case "settings":  return <SettingsPage role={role} profiles={profiles} currentUserId={session && session !== "loading" ? session.user.id : ""} p4Ready={p4Ready} p5Ready={p5Ready} onRefresh={fetchAll} />;
+      case "settings":  return <SettingsPage role={role} profiles={profiles} staff={staff} currentUserId={currentUserId} p4Ready={p4Ready} p5Ready={p5Ready} p7Ready={p7Ready} onRefresh={fetchAll} />;
       case "events":
         if (selectedEvent) return (
           <EventDetailPage
@@ -5189,7 +5294,7 @@ export default function App() {
       {quickAdd && <QuickAddModal onClose={() => setQuickAdd(false)} onAction={handleQuickAction} />}
       {modal === "client"   && <NewClientModal  record={editingRecord} onClose={closeModal} onSaved={fetchAll} />}
       {modal === "lead"     && <NewLeadModal    onClose={closeModal} onSaved={fetchAll} />}
-      {modal === "project"  && <NewProjectModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} clients={clients} staff={staff} />}
+      {modal === "project"  && <NewProjectModal record={editingRecord} onClose={closeModal} onSaved={fetchAll} clients={clients} staff={staff} role={role} ownStaffId={ownStaffId} />}
       {modal === "task"     && <NewTaskModal    onClose={closeModal} onSaved={fetchAll} projects={projects} staff={staff} />}
       {modal === "task-for-project" && selectedProject && (
         <NewTaskModal onClose={closeModal} onSaved={() => { closeModal(); fetchAll(); }} projects={[selectedProject]} staff={staff} />

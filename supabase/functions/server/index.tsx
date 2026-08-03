@@ -86,4 +86,42 @@ app.post("/make-server-ecee925a/overdue-check", async (c) => {
   return c.json({ projectsFlipped: projectIds.length, invoicesFlipped: invoiceIds.length, emailSent });
 });
 
+// Founder-only: invite a new team member by email via Supabase Auth's built-in
+// invite flow (creates the auth user and emails them a set-password link — no
+// separate email provider needed). Pre-seeds their `profiles` row with the role
+// the founder picked so they land with the right access on first login instead
+// of always defaulting to "member". Runs with the service-role key (bypasses
+// RLS) precisely because this is the one action that must NOT be reachable by
+// just anyone — the caller's own JWT is verified and their `profiles.role` is
+// checked to be "founder" before anything else happens.
+app.post("/make-server-ecee925a/invite-user", async (c) => {
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!token) return c.json({ error: "Not signed in." }, 401);
+
+  const { data: callerData, error: callerErr } = await supabase.auth.getUser(token);
+  if (callerErr || !callerData.user) return c.json({ error: "Not signed in." }, 401);
+
+  const { data: callerProfile } = await supabase.from("profiles").select("role").eq("id", callerData.user.id).maybeSingle();
+  if (callerProfile?.role !== "founder") return c.json({ error: "Only the founder can invite team members." }, 403);
+
+  const { email, role, redirectTo } = await c.req.json();
+  if (!email) return c.json({ error: "Email is required." }, 400);
+
+  const { data: invited, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
+    redirectTo: redirectTo || undefined,
+  });
+  if (inviteErr) return c.json({ error: inviteErr.message }, 400);
+
+  if (invited.user) {
+    await supabase.from("profiles").upsert({ id: invited.user.id, email, role: role || "member" });
+  }
+
+  return c.json({ ok: true, userId: invited.user?.id ?? null });
+});
+
 Deno.serve(app.fetch);
